@@ -5,6 +5,7 @@ const adminService = require('../services/admin.service');
 const router = express.Router();
 
 router.post('/login', adminService.login);
+router.get('/contact', adminService.getContact);
 router.get('/overview', adminAuth, adminService.getOverview);
 
 router.get('/vendors', adminAuth, adminService.getVendors);
