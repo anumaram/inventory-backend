@@ -42,7 +42,7 @@ async function synchronizeReturnStatuses() {
   try {
     const activeRecords = await Return.find({
       isDeleted: { $ne: true },
-      status: { $nin: ['refund_credited', 'completed', 'rejected'] }
+      status: { $nin: ['refund_credited', 'completed', 'rejected', 'cancelled'] }
     });
 
     let updatedCount = 0;

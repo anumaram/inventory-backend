@@ -32,7 +32,22 @@ const orderSchema = new mongoose.Schema(
     cancellationReason: { type: String, default: '' },
     cancelledAt: Date,
     cancelledBy: { type: String, default: '' },
-    returnStatus: { type: String, enum: ['none', 'requested', 'approved', 'rejected', 'returned'], default: 'none' },
+    returnStatus: {
+      type: String,
+      enum: [
+        'none',
+        'requested',
+        'approved',
+        'rejected',
+        'returned',
+        'cancelled',
+        'pickup_confirmed',
+        'item_received',
+        'quality_passed',
+        'refund_credited'
+      ],
+      default: 'none'
+    },
     returnReason: { type: String, default: '' },
     returnComments: { type: String, default: '' },
     returnRequestedAt: Date,

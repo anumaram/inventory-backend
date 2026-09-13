@@ -229,9 +229,17 @@ exports.updateReturnStatusByVendor = async (req, res) => {
     } else if (action === 'confirm_received') {
       newStatus = 'item_received';
       timelineNote = note || 'Item received at merchant hub and logged for quality inspection.';
+      if (order) {
+        order.returnStatus = 'item_received';
+        await order.save();
+      }
     } else if (action === 'pass_quality') {
       newStatus = 'quality_passed';
       timelineNote = note || 'Quality check passed. Product verified in original resalable condition.';
+      if (order) {
+        order.returnStatus = 'quality_passed';
+        await order.save();
+      }
       // Restore inventory stock
       if (!returnRecord.isStockRestored && Array.isArray(returnRecord.items)) {
         for (const it of returnRecord.items) {
