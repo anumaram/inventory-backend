@@ -1,20 +1,40 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const mongoose = require('mongoose');
 
 require('./db');
+const { startOrderStatusScheduler } = require('./services/order-status.service');
+const { startReturnStatusScheduler } = require('./services/return-status.service');
+
+// Start schedulers once MongoDB connection is open
+if (mongoose.connection.readyState === 1) {
+  startOrderStatusScheduler();
+  startReturnStatusScheduler();
+} else {
+  mongoose.connection.once('open', () => {
+    startOrderStatusScheduler();
+    startReturnStatusScheduler();
+  });
+}
 
 const app = express();
 app.disable('etag');
 
 app.use(
   cors({
-    origin: [
-      'http://localhost:4200',
-      'http://127.0.0.1:4200',
-      'http://localhost:4300',
-      'http://127.0.0.1:4300'
-    ],
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      if (isLocalhost) {
+        return callback(null, true);
+      }
+
+      return callback(new Error('Not allowed by CORS'));
+    },
     allowedHeaders: ['Content-Type', 'Authorization']
   })
 );
@@ -32,6 +52,9 @@ app.use('/products', require('./routes/product.routes'));
 app.use('/orders', require('./routes/order.routes'));
 app.use('/wishlist', require('./routes/wishlist.routes'));
 app.use('/cart', require('./routes/cart.routes'));
+app.use('/addresses', require('./routes/address.routes'));
+app.use('/notifications', require('./routes/notification.routes'));
+app.use('/returns', require('./routes/return.routes'));
 app.use('/admin/api', require('./routes/admin.routes'));
 
 const adminFrontendPath = path.join(__dirname, '..', 'admin-frontend');
@@ -49,4 +72,12 @@ app.get('/', (req, res) => {
 
 app.listen(3000, () => {
   console.log('Server running on http://localhost:3000');
+  // Do the startup synchronization only after MongoDB is ready. With
+  // bufferCommands disabled, running it earlier would fail and defer the next
+  // real attempt until the hourly interval.
+  if (mongoose.connection.readyState === 1) {
+    startOrderStatusScheduler();
+  } else {
+    mongoose.connection.once('connected', startOrderStatusScheduler);
+  }
 });

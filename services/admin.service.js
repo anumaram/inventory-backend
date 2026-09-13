@@ -64,6 +64,19 @@ exports.login = async (req, res) => {
   res.json({ token });
 };
 
+exports.getContact = async (req, res) => {
+  const admin = await admins.findOne(
+    { isDeleted: { $ne: true } },
+    { _id: 1, name: 1, email: 1, mobile: 1, address: 1 }
+  ).sort({ createdAt: -1 });
+
+  if (!admin) {
+    return res.status(404).json({ msg: 'Admin details not found' });
+  }
+
+  res.json(admin);
+};
+
 exports.getOverview = async (req, res) => {
   const range = (req.query.range || 'week').toLowerCase();
   const { start, days } = buildRangeStart(range);

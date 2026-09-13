@@ -1,7 +1,47 @@
 const router = require('express').Router();
 
 const customerAuth = require('../middleware/customer.middleware');
-const { getWishlist, addToWishlist, removeFromWishlist } = require('../services/wishlist.service');
+const {
+  getWishlist,
+  addToWishlist,
+  removeFromWishlist,
+  getCollections,
+  createCollection,
+  updateCollection,
+  deleteCollection
+} = require('../services/wishlist.service');
+
+router.get('/collections', customerAuth, async (req, res) => {
+  try {
+    await getCollections(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to load wishlist collections' });
+  }
+});
+
+router.post('/collections', customerAuth, async (req, res) => {
+  try {
+    await createCollection(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to create wishlist collection' });
+  }
+});
+
+router.put('/collections/:id', customerAuth, async (req, res) => {
+  try {
+    await updateCollection(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to update wishlist collection' });
+  }
+});
+
+router.delete('/collections/:id', customerAuth, async (req, res) => {
+  try {
+    await deleteCollection(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to delete wishlist collection' });
+  }
+});
 
 router.get('/', customerAuth, async (req, res) => {
   try {
