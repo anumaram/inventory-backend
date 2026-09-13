@@ -327,6 +327,15 @@ exports.updateReturnStatusByVendor = async (req, res) => {
       } catch (e) {
         console.error('[ReturnService] Error sending rejection notification:', e.message);
       }
+    } else if (action === 'cancel') {
+      newStatus = 'cancelled';
+      returnRecord.refundStatus = 'none';
+      timelineNote = note || 'Return request cancelled by customer.';
+      if (order) {
+        order.returnStatus = 'cancelled';
+        order.refundStatus = 'none';
+        await order.save();
+      }
     } else {
       return res.status(400).json({ msg: `Unsupported action: ${action}` });
     }

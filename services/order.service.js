@@ -808,6 +808,99 @@ exports.requestReturn = async (req, res) => {
 };
 
 /**
+ * Customer Cancels Return Request (Allowed if returnStatus === 'requested')
+ */
+exports.cancelReturn = async (req, res) => {
+  const { id } = req.params;
+
+  const order = await Order.findOne({
+    $or: [{ _id: toObjectId(id) }, { orderId: id }],
+    customerId: req.customerId,
+    isDeleted: { $ne: true }
+  });
+
+  if (!order) {
+    return res.status(404).json({ msg: 'Order not found' });
+  }
+
+  const currentReturnStatus = String(order.returnStatus || '').toLowerCase();
+  if (currentReturnStatus !== 'requested') {
+    return res.status(400).json({
+      msg: currentReturnStatus === 'none' || !currentReturnStatus
+        ? 'No active return request found for this order'
+        : `Return request cannot be cancelled because it is already ${currentReturnStatus.replace(/_/g, ' ')}`
+    });
+  }
+
+  const now = new Date();
+  order.returnStatus = 'cancelled';
+  order.refundStatus = 'none';
+
+  await order.save();
+
+  const Return = require('../models/return.model');
+  const notificationService = require('./notification.service');
+  const oId = order.orderId || String(order._id).slice(-8).toUpperCase();
+
+  try {
+    const returnRecord = await Return.findOne({
+      $or: [{ orderRef: order._id }, { orderId: oId }],
+      type: 'return',
+      status: { $in: ['requested', 'pending'] }
+    });
+
+    if (returnRecord) {
+      returnRecord.status = 'cancelled';
+      returnRecord.refundStatus = 'none';
+      returnRecord.timeline = returnRecord.timeline || [];
+      returnRecord.timeline.push({
+        status: 'cancelled',
+        timestamp: now,
+        note: 'Customer cancelled the return request.',
+        updatedBy: 'customer'
+      });
+      await returnRecord.save();
+    }
+  } catch (err) {
+    console.error('[OrderService] Error updating return record on cancellation:', err.message);
+  }
+
+  // Send notifications
+  (async () => {
+    try {
+      await notificationService.createNotification({
+        recipientType: 'customer',
+        recipientId: req.customerId,
+        title: 'Return Request Cancelled',
+        message: `You have successfully cancelled the return request for Order #${oId}. Your order status remains Delivered.`,
+        type: 'order_return_cancelled',
+        orderId: oId,
+        actionUrl: '/customer/orders'
+      });
+
+      if (order.vendorId) {
+        await notificationService.createNotification({
+          recipientType: 'vendor',
+          recipientId: order.vendorId,
+          title: `Return Cancelled for Order #${oId}`,
+          message: `Customer cancelled their return request for Order #${oId}.`,
+          type: 'order_return_cancelled',
+          orderId: oId,
+          actionUrl: '/vendor/returns'
+        });
+      }
+    } catch (e) {
+      console.error('[OrderService] Return cancellation notif error:', e.message);
+    }
+  })();
+
+  res.json({
+    msg: 'Return request cancelled successfully. Your order remains Delivered.',
+    order: normalizeOrder(order.toObject ? order.toObject() : order)
+  });
+};
+
+/**
  * Vendor Updates Order Fulfillment Status
  */
 exports.updateVendorOrderStatus = async (req, res) => {

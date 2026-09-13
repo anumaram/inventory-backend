@@ -8,7 +8,8 @@ const {
   getVendorOrders,
   updateVendorOrderStatus,
   cancelOrder,
-  requestReturn
+  requestReturn,
+  cancelReturn
 } = require('../services/order.service');
 
 router.post('/', customerAuth, async (req, res) => {
@@ -32,6 +33,14 @@ router.post('/:id/return', customerAuth, async (req, res) => {
     await requestReturn(req, res);
   } catch (err) {
     res.status(500).json({ msg: err.message || 'Failed to request return' });
+  }
+});
+
+router.post('/:id/cancel-return', customerAuth, async (req, res) => {
+  try {
+    await cancelReturn(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to cancel return request' });
   }
 });
 
