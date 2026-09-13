@@ -56,13 +56,19 @@ exports.addToWishlist = async (req, res) => {
   if (!productId) {
     return res.status(400).json({ msg: 'Product is required' });
   }
-  if (!collectionId || !mongoose.Types.ObjectId.isValid(collectionId)) {
-    return res.status(400).json({ msg: 'Choose a wishlist collection' });
-  }
 
-  const collection = await WishlistCollection.findOne({ _id: collectionId, customerId: req.customerId }).lean();
-  if (!collection) {
-    return res.status(404).json({ msg: 'Wishlist collection not found' });
+  let targetCollectionId = collectionId;
+  if (!targetCollectionId || !mongoose.Types.ObjectId.isValid(targetCollectionId)) {
+    let defaultCol = await WishlistCollection.findOne({ customerId: req.customerId }).sort({ createdAt: 1 });
+    if (!defaultCol) {
+      defaultCol = await WishlistCollection.create({ customerId: req.customerId, name: 'My Wishlist' });
+    }
+    targetCollectionId = defaultCol._id;
+  } else {
+    const collection = await WishlistCollection.findOne({ _id: targetCollectionId, customerId: req.customerId }).lean();
+    if (!collection) {
+      return res.status(404).json({ msg: 'Wishlist collection not found' });
+    }
   }
 
   const existingAgg = await Wishlist.aggregate([
@@ -73,22 +79,22 @@ exports.addToWishlist = async (req, res) => {
       }
     },
     { $limit: 1 },
-    { $project: { _id: 1, customerId: 1, productId: 1, isDeleted: 1 } }
+    { $project: { _id: 1, customerId: 1, productId: 1, isDeleted: 1, collectionId: 1 } }
   ]);
   const existing = existingAgg[0] || null;
   if (existing) {
     if (existing.isDeleted) {
       const updated = await Wishlist.findOneAndUpdate(
         { _id: existing._id },
-        { isDeleted: false, collectionId },
+        { isDeleted: false, collectionId: targetCollectionId },
         { returnDocument: 'after' }
       );
       return res.json(updated);
     }
-    if (!existing.collectionId || String(existing.collectionId) !== String(collectionId)) {
+    if (!existing.collectionId || String(existing.collectionId) !== String(targetCollectionId)) {
       const moved = await Wishlist.findOneAndUpdate(
         { _id: existing._id },
-        { collectionId },
+        { collectionId: targetCollectionId },
         { returnDocument: 'after' }
       );
       return res.json(moved);
@@ -104,7 +110,7 @@ exports.addToWishlist = async (req, res) => {
   const item = await Wishlist.create({
     customerId: req.customerId,
     productId,
-    collectionId,
+    collectionId: targetCollectionId,
     category: product.category || 'Others'
   });
   res.json(item);
