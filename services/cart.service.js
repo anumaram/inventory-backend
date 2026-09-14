@@ -7,6 +7,7 @@ const Customer = require('../models/customer.model');
 const User = require('../models/user.model');
 const { generateOrderId } = require('../utils/orderId.util');
 const { generateInvoiceId } = require('../utils/invoiceId.util');
+const { createTransaction } = require('./transaction.service');
 
 
 const toObjectId = (value) =>
@@ -171,20 +172,21 @@ exports.checkoutCart = async (req, res) => {
   }
 
   let addressData;
-  if (req.body?.addressId) {
-    if (!mongoose.Types.ObjectId.isValid(req.body.addressId)) {
-      return res.status(404).json({ msg: 'Address not found' });
-    }
-
-    const address = await Address.findOne({
+  let address = null;
+  if (req.body?.addressId && mongoose.Types.ObjectId.isValid(req.body.addressId)) {
+    address = await Address.findOne({
       _id: req.body.addressId,
       customerId: req.customerId,
       isDeleted: { $ne: true }
     });
-    if (!address) {
-      return res.status(404).json({ msg: 'Address not found' });
-    }
+  }
+  if (!address) {
+    // Fallback to customer's default or most recent active address
+    address = await Address.findOne({ customerId: req.customerId, isDefault: true, isDeleted: { $ne: true } })
+      || await Address.findOne({ customerId: req.customerId, isDeleted: { $ne: true } });
+  }
 
+  if (address) {
     addressData = {
       addressId: address._id,
       shippingAddress: {
@@ -247,7 +249,23 @@ exports.checkoutCart = async (req, res) => {
     FREESHIP: { type: 'shipping', value: 0, minimum: 499 }
   };
   const couponCode = String(req.body?.couponCode || '').toUpperCase();
-  const coupon = couponRules[couponCode];
+  let coupon = couponRules[couponCode];
+  if (!coupon && couponCode) {
+    try {
+      const Coupon = require('../models/coupon.model');
+      const dbCoupon = await Coupon.findOne({ code: couponCode, isActive: true, isDeleted: { $ne: true } });
+      if (dbCoupon) {
+        coupon = {
+          type: dbCoupon.discountType === 'percentage' ? 'percent' : 'flat',
+          value: dbCoupon.discountValue,
+          minimum: dbCoupon.minOrderAmount,
+          cap: dbCoupon.maxDiscountAmount || Infinity
+        };
+      }
+    } catch {
+      // non-blocking
+    }
+  }
   if (coupon && coupon.minimum && subtotal < coupon.minimum) {
     return res.status(400).json({ msg: 'Coupon minimum order value was not met' });
   }
@@ -276,14 +294,15 @@ exports.checkoutCart = async (req, res) => {
     if (req.body.secondaryPaymentMethod) {
       const PaymentMethod = require('../models/payment-method.model');
       let savedMethod = null;
-      if (req.body.secondaryPaymentMethodId) {
+      if (req.body.secondaryPaymentMethodId && mongoose.Types.ObjectId.isValid(req.body.secondaryPaymentMethodId)) {
         savedMethod = await PaymentMethod.findOne({ _id: req.body.secondaryPaymentMethodId, customerId: req.customerId, isDeleted: { $ne: true } });
       }
       if (!savedMethod) {
         savedMethod = await PaymentMethod.findOne({ customerId: req.customerId, type: req.body.secondaryPaymentMethod, isDeleted: { $ne: true } });
       }
-      if (!savedMethod) {
-        return res.status(400).json({ msg: 'Save the secondary payment method before checkout' });
+      const allowedSecondary = ['upi', 'card', 'netbanking', 'cod'];
+      if (!savedMethod && !allowedSecondary.includes(req.body.secondaryPaymentMethod)) {
+        return res.status(400).json({ msg: 'Please select a valid secondary payment method' });
       }
     }
   }
@@ -405,11 +424,24 @@ exports.checkoutCart = async (req, res) => {
 
   // Deduct from wallet if wallet payment was used
   if (walletCustomer) {
-    walletCustomer.wallet.balance = Math.max(
-      0,
-      Number(walletCustomer.wallet.balance || 0) - Math.min(Number(walletCustomer.wallet.balance || 0), orderTotal)
-    );
+    const currentBalance = Number(walletCustomer.wallet.balance || 0);
+    const walletDebitAmount = Math.min(currentBalance, orderTotal);
+
+    walletCustomer.wallet.balance = Math.max(0, currentBalance - walletDebitAmount);
     await walletCustomer.save();
+
+    if (walletDebitAmount > 0) {
+      await createTransaction({
+        customerId: req.customerId,
+        type: 'wallet_debit',
+        amount: walletDebitAmount,
+        direction: 'debit',
+        status: 'success',
+        description: `Wallet debit for order payment`,
+        paymentMethod: 'wallet',
+        meta: { orderTotal }
+      });
+    }
   }
 
   // Log inventory history for each purchased product
@@ -443,6 +475,64 @@ exports.checkoutCart = async (req, res) => {
     }
   } catch (invErr) {
     console.error('Failed to log inventory history on checkout:', invErr);
+  }
+
+  // Log customer and vendor transactions
+  try {
+    const { createTransaction } = require('./transaction.service');
+    const { createVendorTransaction } = require('./vendor-transaction.service');
+    const custInfo = await Customer.findById(req.customerId).select('name');
+    for (const order of createdOrders) {
+      const oId = order.orderId || `ORD-${String(order._id).slice(-8).toUpperCase()}`;
+      const total = Number(order.totalAmount || 0);
+      const commission = Math.round(total * 0.05);
+      const netAmount = total - commission;
+      const firstItem = order.items?.[0] || {};
+      const prodName = firstItem.name || 'Product Item';
+
+      // 1. Customer Payment Transaction
+      await createTransaction({
+        customerId: req.customerId,
+        type: 'payment',
+        amount: total,
+        direction: 'debit',
+        status: 'success',
+        orderId: order._id,
+        orderDisplayId: oId,
+        description: `Payment for Order #${oId}`,
+        paymentMethod: order.paymentMethod || 'online',
+        meta: {
+          productName: prodName,
+          itemCount: order.items?.length || 1,
+          orderStatus: order.status
+        }
+      });
+
+      // 2. Vendor Earning Transaction
+      if (order.vendorId) {
+        await createVendorTransaction({
+          vendorId: order.vendorId,
+          type: 'order_earning',
+          amount: total,
+          direction: 'credit',
+          status: 'completed',
+          orderId: order._id,
+          orderDisplayId: oId,
+          customerId: req.customerId,
+          customerName: custInfo?.name || 'Customer',
+          commission,
+          netAmount,
+          description: `Sale earnings for Order #${oId}`,
+          meta: {
+            itemCount: order.items?.length || 1,
+            productName: prodName,
+            paymentMethod: order.paymentMethod || 'online'
+          }
+        });
+      }
+    }
+  } catch (txnErr) {
+    console.error('Failed to log transactions on checkout:', txnErr.message);
   }
 
   // Send real-time emails and create in-app notifications asynchronously

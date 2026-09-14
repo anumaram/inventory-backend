@@ -3,6 +3,8 @@ const Order = require('../models/order.model');
 const Product = require('../models/product.model');
 const Customer = require('../models/customer.model');
 const notificationService = require('./notification.service');
+const { createTransaction } = require('./transaction.service');
+const { createVendorTransaction } = require('./vendor-transaction.service');
 
 // Returns: 6 steps divided across 24 hours (1 day)
 const RETURN_TIMELINE_STEPS = [
@@ -140,6 +142,36 @@ async function synchronizeReturnStatuses() {
                     createdAt: now
                   });
                   await customer.save();
+                  await createTransaction({
+                    customerId: record.customerId,
+                    type: 'refund',
+                    amount: Number(record.refundAmount),
+                    direction: 'credit',
+                    status: 'processed',
+                    orderId: record.orderRef,
+                    orderDisplayId: record.orderId || '',
+                    description: `Refund for Order #${record.orderId || String(record.orderRef).slice(-10).toUpperCase()} (auto-processed)`,
+                    paymentMethod: 'wallet',
+                    meta: { automated: true, returnType: type || 'return' }
+                  });
+
+                  if (record.vendorId && Number(record.refundAmount) > 0) {
+                    await createVendorTransaction({
+                      vendorId: record.vendorId,
+                      type: 'refund_deduction',
+                      amount: Number(record.refundAmount),
+                      direction: 'debit',
+                      status: 'completed',
+                      orderId: record.orderRef,
+                      orderDisplayId: record.orderId || '',
+                      customerId: record.customerId,
+                      customerName: customer.name || 'Customer',
+                      commission: 0,
+                      netAmount: Number(record.refundAmount),
+                      description: `Refund deduction for ${type === 'cancellation' ? 'cancelled' : 'returned'} Order #${record.orderId || String(record.orderRef).slice(-10).toUpperCase()} (auto-processed)`,
+                      meta: { automated: true, returnType: type || 'return', returnId: record.returnId || String(record._id) }
+                    });
+                  }
                 }
               }
             } catch (walletErr) {

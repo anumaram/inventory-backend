@@ -6,15 +6,18 @@ const mongoose = require('mongoose');
 require('./db');
 const { startOrderStatusScheduler } = require('./services/order-status.service');
 const { startReturnStatusScheduler } = require('./services/return-status.service');
+const { startEmailCronScheduler } = require('./services/email-cron.service');
 
 // Start schedulers once MongoDB connection is open
 if (mongoose.connection.readyState === 1) {
   startOrderStatusScheduler();
   startReturnStatusScheduler();
+  startEmailCronScheduler();
 } else {
   mongoose.connection.once('open', () => {
     startOrderStatusScheduler();
     startReturnStatusScheduler();
+    startEmailCronScheduler();
   });
 }
 
@@ -56,6 +59,8 @@ app.use('/addresses', require('./routes/address.routes'));
 app.use('/notifications', require('./routes/notification.routes'));
 app.use('/returns', require('./routes/return.routes'));
 app.use('/admin/api', require('./routes/admin.routes'));
+app.use('/transactions', require('./routes/transaction.routes'));
+app.use('/vendor/transactions', require('./routes/vendor-transaction.routes'));
 
 const adminFrontendPath = path.join(__dirname, '..', 'admin-frontend');
 app.use('/admin', express.static(adminFrontendPath));

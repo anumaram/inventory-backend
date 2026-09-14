@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const Return = require('../models/return.model');
 const Order = require('../models/order.model');
 const Customer = require('../models/customer.model');
+const { createTransaction } = require('./transaction.service');
+const { createVendorTransaction } = require('./vendor-transaction.service');
 
 const { synchronizeReturnStatuses } = require('./return-status.service');
 
@@ -285,6 +287,37 @@ exports.updateReturnStatusByVendor = async (req, res) => {
             date: now
           });
           await customer.save();
+          await createTransaction({
+            customerId: returnRecord.customerId,
+            type: 'refund',
+            amount: finalRefundAmt,
+            direction: 'credit',
+            status: 'processed',
+            orderId: order._id,
+            orderDisplayId: order.orderId || '',
+            description: `Refund for returned Order #${order.orderId || String(order._id).slice(-10).toUpperCase()}`,
+            paymentMethod: 'wallet',
+            meta: { returnId: returnRecord._id?.toString() || '', reason: returnRecord.reason || 'Item returned' }
+          });
+
+          const vendorIdToUse = (order && order.vendorId) || returnRecord.vendorId;
+          if (vendorIdToUse && finalRefundAmt > 0) {
+            await createVendorTransaction({
+              vendorId: vendorIdToUse,
+              type: 'refund_deduction',
+              amount: finalRefundAmt,
+              direction: 'debit',
+              status: 'completed',
+              orderId: order?._id || null,
+              orderDisplayId: order?.orderId || returnRecord.orderId || '',
+              customerId: returnRecord.customerId,
+              customerName: customer.name || 'Customer',
+              commission: 0,
+              netAmount: finalRefundAmt,
+              description: `Refund deduction for returned Order #${order?.orderId || returnRecord.orderId || ''}`,
+              meta: { returnId: returnRecord.returnId || String(returnRecord._id), reason: returnRecord.reason || 'Item returned' }
+            });
+          }
         }
       }
 

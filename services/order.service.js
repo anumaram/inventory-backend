@@ -6,6 +6,7 @@ const User = require('../models/user.model');
 const { generateOrderId } = require('../utils/orderId.util');
 const { generateInvoiceId } = require('../utils/invoiceId.util');
 const emailService = require('./email.service');
+const { createTransaction } = require('./transaction.service');
 
 const toObjectId = (value) =>
   mongoose.Types.ObjectId.isValid(value)
@@ -614,6 +615,40 @@ exports.cancelOrder = async (req, res) => {
         $inc: { 'wallet.balance': orderTotal }
       }
     );
+    await createTransaction({
+      customerId: req.customerId,
+      type: 'refund',
+      amount: orderTotal,
+      direction: 'credit',
+      status: 'processed',
+      orderId: order._id,
+      orderDisplayId: order.orderId || '',
+      description: `Refund for cancelled Order #${order.orderId || String(order._id).slice(-10).toUpperCase()}`,
+      paymentMethod: 'wallet',
+      meta: { reason: req.body?.reason || 'Order cancelled', originalPaymentMethod: order.paymentMethod || '' }
+    });
+    if (order.vendorId) {
+      try {
+        const { createVendorTransaction } = require('./vendor-transaction.service');
+        await createVendorTransaction({
+          vendorId: order.vendorId,
+          type: 'refund_deduction',
+          amount: orderTotal,
+          direction: 'debit',
+          status: 'completed',
+          orderId: order._id,
+          orderDisplayId: order.orderId || '',
+          customerId: req.customerId,
+          customerName: 'Customer',
+          commission: 0,
+          netAmount: orderTotal,
+          description: `Refund deduction for cancelled Order #${order.orderId || String(order._id).slice(-10).toUpperCase()}`,
+          meta: { reason: req.body?.reason || 'Order cancelled' }
+        });
+      } catch (vErr) {
+        console.error('Failed to log vendor refund deduction:', vErr.message);
+      }
+    }
     order.refundAmount = orderTotal;
     order.refundStatus = 'credited';
   } else {

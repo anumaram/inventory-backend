@@ -1,6 +1,7 @@
 const Customer = require('../models/customer.model');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const { createTransaction } = require('./transaction.service');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'secret';
 
@@ -138,6 +139,17 @@ exports.topUpWallet = async (req, res) => {
   customer.wallet = customer.wallet || { balance: 0 };
   customer.wallet.balance = Number(customer.wallet.balance || 0) + amount;
   await customer.save();
+
+  await createTransaction({
+    customerId: req.customerId,
+    type: 'wallet_topup',
+    amount: amount,
+    direction: 'credit',
+    status: 'success',
+    description: `Wallet recharge of ₹${amount.toLocaleString('en-IN')}`,
+    paymentMethod: req.body?.method || 'online',
+    meta: { source: req.body?.method || 'online', upiId: req.body?.upiId || '', cardLast4: req.body?.cardLast4 || '' }
+  });
 
   const notificationService = require('./notification.service');
   notificationService.createNotification({
