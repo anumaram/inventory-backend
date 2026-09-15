@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const VendorTransaction = require('../models/vendor-transaction.model');
+const User = require('../models/user.model');
 const { createNotification } = require('./notification.service');
 
 exports.createVendorTransaction = async (data) => {
@@ -60,8 +61,14 @@ exports.getVendorTransactions = async (req, res) => {
 
     const query = conditions.length > 1 ? { $and: conditions } : conditions[0];
 
+    let sortObj = { createdAt: -1 };
+    const sortBy = req.query.sortBy;
+    if (sortBy === 'date_asc') sortObj = { createdAt: 1 };
+    else if (sortBy === 'amount_desc') sortObj = { amount: -1, createdAt: -1 };
+    else if (sortBy === 'amount_asc') sortObj = { amount: 1, createdAt: -1 };
+
     const [items, total, summaryAgg] = await Promise.all([
-      VendorTransaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      VendorTransaction.find(query).sort(sortObj).skip(skip).limit(limit),
       VendorTransaction.countDocuments(query),
       VendorTransaction.aggregate([
         { $match: { vendorId: new mongoose.Types.ObjectId(vendorId) } },
@@ -171,6 +178,37 @@ exports.requestPayout = async (req, res) => {
     const s = summaryAgg[0] || { totalEarnings: 0, totalCommission: 0, totalRefundDeductions: 0, totalPayouts: 0 };
     const netRevenue = Math.max(0, s.totalEarnings - s.totalRefundDeductions - s.totalCommission);
     const availableBalance = Math.max(0, netRevenue - s.totalPayouts);
+
+    const user = await User.findOne({ _id: vendorId, isDeleted: { $ne: true } });
+    if (!user) {
+      return res.status(404).json({ msg: 'Vendor account not found' });
+    }
+
+    // Check if 2FA OTP is required for payout
+    if (user.vendorSettings?.twoFactorAuth === true) {
+      const cleanOtp = String(req.body?.otp || '').trim();
+      if (!cleanOtp) {
+        return res.status(200).json({
+          otpRequired: true,
+          msg: 'Two-Factor Authentication is enabled. Please enter the OTP sent to your email to confirm payout.'
+        });
+      }
+
+      if (
+        !user.otp?.code ||
+        user.otp.code !== cleanOtp ||
+        !user.otp.expiresAt ||
+        new Date(user.otp.expiresAt) <= new Date()
+      ) {
+        return res.status(400).json({ msg: 'Invalid or expired OTP code for payout request' });
+      }
+
+      // Invalidate used OTP
+      await User.updateOne(
+        { _id: vendorId },
+        { $set: { 'otp.code': '', 'otp.purpose': '', 'otp.expiresAt': null } }
+      );
+    }
 
     if (withdrawAmount > availableBalance) {
       return res.status(400).json({

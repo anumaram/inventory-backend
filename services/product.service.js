@@ -648,7 +648,7 @@ exports.getProductReviews = async (req, res) => {
     return res.status(400).json({ msg: 'Invalid product ID' });
   }
 
-  const reviews = await Review.find({ productId: toObjectId(id) }).sort({ createdAt: -1 });
+  const reviews = await Review.find({ productId: toObjectId(id), status: { $ne: 'rejected' } }).sort({ createdAt: -1 });
 
   // Rating distribution
   const counts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };

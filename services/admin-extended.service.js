@@ -25,6 +25,7 @@ const SupportTicket = require('../models/support-ticket.model');
 const AdminRole = require('../models/admin-role.model');
 const AuditLog = require('../models/audit-log.model');
 const StoreSettings = require('../models/store-settings.model');
+const Address = require('../models/address.model');
 
 const emailService = require('./email.service');
 const emailCronService = require('./email-cron.service');
@@ -201,17 +202,25 @@ exports.getCustomersList = async (req, res) => {
     const { page, limit, skip } = getPagination(req);
     const q = (req.query.q || '').trim();
     const status = req.query.status;
+    const sortBy = req.query.sortBy || 'newest';
 
     const match = { isDeleted: { $ne: true } };
     if (q) {
       const regex = new RegExp(q, 'i');
-      match.$or = [{ name: regex }, { email: regex }, { mobile: regex }];
+      match.$or = [{ name: regex }, { email: regex }, { phone: regex }, { mobile: regex }];
     }
     if (status === 'blocked') match.isBlocked = true;
     if (status === 'active') match.isBlocked = { $ne: true };
 
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'name_asc') sortObj = { name: 1 };
+    else if (sortBy === 'name_desc') sortObj = { name: -1 };
+    else if (sortBy === 'wallet_desc') sortObj = { 'wallet.balance': -1 };
+    else if (sortBy === 'wallet_asc') sortObj = { 'wallet.balance': 1 };
+
     const [items, total] = await Promise.all([
-      Customer.find(match).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Customer.find(match).sort(sortObj).skip(skip).limit(limit).lean(),
       Customer.countDocuments(match)
     ]);
 
@@ -222,6 +231,43 @@ exports.getCustomersList = async (req, res) => {
       limit,
       totalPages: Math.ceil(total / limit) || 1,
       hasMore: skip + items.length < total
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.getCustomerDetails = async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).lean();
+    if (!customer) return res.status(404).json({ msg: 'Customer not found' });
+
+    // Fetch customer's orders summary & recent orders
+    const [orders, transactions, addresses] = await Promise.all([
+      Order.find({ customerId: customer._id, isDeleted: { $ne: true } })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      Transaction.find({ customerId: customer._id })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      Address.find({ customerId: customer._id, isDeleted: { $ne: true } })
+        .sort({ createdAt: -1 })
+        .lean()
+        .catch(() => [])
+    ]);
+
+    const totalOrders = await Order.countDocuments({ customerId: customer._id, isDeleted: { $ne: true } });
+    const totalSpent = orders.reduce((sum, o) => sum + (Number(o.totalAmount || o.price || 0)), 0);
+
+    res.json({
+      customer,
+      totalOrders,
+      totalSpent,
+      recentOrders: orders,
+      recentTransactions: transactions,
+      addresses
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -306,16 +352,23 @@ exports.getVendorsList = async (req, res) => {
     const { page, limit, skip } = getPagination(req);
     const q = (req.query.q || '').trim();
     const status = req.query.status;
+    const sortBy = req.query.sortBy || 'newest';
 
     const match = { isDeleted: { $ne: true } };
     if (q) {
       const regex = new RegExp(q, 'i');
       match.$or = [{ name: regex }, { email: regex }, { businessName: regex }];
     }
-    if (status) match.status = status;
+    if (status && status !== 'all') match.status = status;
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'name_asc') sortObj = { name: 1 };
+    else if (sortBy === 'name_desc') sortObj = { name: -1 };
+    else if (sortBy === 'business_asc') sortObj = { businessName: 1 };
 
     const [items, total] = await Promise.all([
-      User.find(match).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      User.find(match).sort(sortObj).skip(skip).limit(limit).lean(),
       User.countDocuments(match)
     ]);
 
@@ -417,6 +470,7 @@ exports.getOrdersList = async (req, res) => {
     const { page, limit, skip } = getPagination(req);
     const q = (req.query.q || '').trim();
     const status = req.query.status;
+    const sortBy = req.query.sortBy || 'newest';
 
     const match = { isDeleted: { $ne: true } };
     if (status && status !== 'all') match.status = status;
@@ -425,9 +479,15 @@ exports.getOrdersList = async (req, res) => {
       match.$or = [{ orderId: regex }, { invoiceId: regex }];
     }
 
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'amount_desc') sortObj = { totalAmount: -1 };
+    else if (sortBy === 'amount_asc') sortObj = { totalAmount: 1 };
+    else if (sortBy === 'status') sortObj = { status: 1, createdAt: -1 };
+
     const [items, total] = await Promise.all([
       Order.find(match)
-        .sort({ createdAt: -1 })
+        .sort(sortObj)
         .skip(skip)
         .limit(limit)
         .populate('customerId', 'name email mobile')
@@ -519,15 +579,32 @@ exports.getInventoryOverview = async (req, res) => {
 exports.getStockHistory = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
+    const q = (req.query.q || '').trim();
+    const sortBy = req.query.sortBy || 'newest';
+
+    const match = {};
+    if (q) {
+      const regex = new RegExp(q, 'i');
+      const matchingProducts = await Product.find({ name: regex }).select('_id');
+      const prodIds = matchingProducts.map(p => p._id);
+      match.$or = [{ reason: regex }, { type: regex }];
+      if (prodIds.length > 0) match.$or.push({ productId: { $in: prodIds } });
+    }
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'qty_desc') sortObj = { quantityChange: -1 };
+    else if (sortBy === 'qty_asc') sortObj = { quantityChange: 1 };
+
     const [items, total] = await Promise.all([
-      InventoryHistory.find()
-        .sort({ createdAt: -1 })
+      InventoryHistory.find(match)
+        .sort(sortObj)
         .skip(skip)
         .limit(limit)
         .populate('productId', 'name price quantity')
         .populate('vendorId', 'name email')
         .lean(),
-      InventoryHistory.countDocuments()
+      InventoryHistory.countDocuments(match)
     ]);
 
     res.json({ items, total, page, limit, hasMore: skip + items.length < total });
@@ -586,16 +663,42 @@ exports.createTransfer = async (req, res) => {
 exports.getReturnsList = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
+    const q = (req.query.q || '').trim();
+    const status = req.query.status;
+    const sortBy = req.query.sortBy || 'newest';
+
+    const match = {};
+    if (status && status !== 'all') match.status = status;
+    if (q) {
+      const regex = new RegExp(q, 'i');
+      const [matchingOrders, matchingCustomers] = await Promise.all([
+        Order.find({ orderId: regex }).select('_id'),
+        Customer.find({ $or: [{ name: regex }, { email: regex }] }).select('_id')
+      ]);
+      const orderIds = matchingOrders.map(o => o._id);
+      const custIds = matchingCustomers.map(c => c._id);
+      const orClauses = [{ reason: regex }];
+      if (orderIds.length > 0) orClauses.push({ orderId: { $in: orderIds } });
+      if (custIds.length > 0) orClauses.push({ customerId: { $in: custIds } });
+      match.$or = orClauses;
+    }
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'amount_desc') sortObj = { refundAmount: -1 };
+    else if (sortBy === 'amount_asc') sortObj = { refundAmount: 1 };
+    else if (sortBy === 'status') sortObj = { status: 1, createdAt: -1 };
+
     const [items, total] = await Promise.all([
-      Return.find()
-        .sort({ createdAt: -1 })
+      Return.find(match)
+        .sort(sortObj)
         .skip(skip)
         .limit(limit)
         .populate('orderId')
         .populate('customerId', 'name email')
         .populate('vendorId', 'name email')
         .lean(),
-      Return.countDocuments()
+      Return.countDocuments(match)
     ]);
 
     res.json({ items, total, page, limit, hasMore: skip + items.length < total });
@@ -666,25 +769,50 @@ exports.getAllTransactions = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
     const type = req.query.type;
+    const q = (req.query.q || '').trim();
+    const sortBy = req.query.sortBy || 'newest';
 
     const match = {};
     if (type && type !== 'all') match.type = type;
+    if (q) {
+      const regex = new RegExp(q, 'i');
+      match.$or = [{ description: regex }, { orderDisplayId: regex }, { paymentMethod: regex }];
+    }
 
     const [customerTxns, vendorTxns] = await Promise.all([
-      Transaction.find(match).sort({ createdAt: -1 }).limit(limit).populate('customerId', 'name email').lean(),
-      VendorTransaction.find(match).sort({ createdAt: -1 }).limit(limit).populate('vendorId', 'name email').lean()
+      Transaction.find(match).sort({ createdAt: -1 }).limit(100).populate('customerId', 'name email').lean(),
+      VendorTransaction.find(match).sort({ createdAt: -1 }).limit(100).populate('vendorId', 'name email').lean()
     ]);
 
-    const combined = [
+    let combined = [
       ...customerTxns.map(t => ({ ...t, portal: 'customer', actorName: t.customerId?.name || 'Customer' })),
       ...vendorTxns.map(t => ({ ...t, portal: 'vendor', actorName: t.vendorId?.name || t.payoutAccount || 'Vendor' }))
-    ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, limit);
+    ];
+
+    if (q) {
+      const lowerQ = q.toLowerCase();
+      combined = combined.filter(t => 
+        (t.description && t.description.toLowerCase().includes(lowerQ)) ||
+        (t.actorName && t.actorName.toLowerCase().includes(lowerQ)) ||
+        (t.orderDisplayId && t.orderDisplayId.toLowerCase().includes(lowerQ)) ||
+        (String(t._id).toLowerCase().includes(lowerQ))
+      );
+    }
+
+    if (sortBy === 'oldest') combined.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    else if (sortBy === 'amount_desc') combined.sort((a, b) => (b.amount || 0) - (a.amount || 0));
+    else if (sortBy === 'amount_asc') combined.sort((a, b) => (a.amount || 0) - (b.amount || 0));
+    else combined.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const paged = combined.slice(skip, skip + limit);
 
     res.json({
-      items: combined,
+      items: paged,
+      total: combined.length,
       page,
       limit,
-      hasMore: combined.length >= limit
+      totalPages: Math.ceil(combined.length / limit) || 1,
+      hasMore: skip + paged.length < combined.length
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -705,10 +833,39 @@ exports.getCoupons = async (req, res) => {
 
 exports.createCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.create(req.body);
+    const title = req.body.title || req.body.code;
+    const coupon = await Coupon.create({ ...req.body, title });
     res.status(201).json(coupon);
   } catch (err) {
     res.status(400).json({ msg: err.message });
+  }
+};
+
+exports.updateCoupon = async (req, res) => {
+  try {
+    const coupon = await Coupon.findByIdAndUpdate(
+      req.params.id,
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!coupon) return res.status(404).json({ msg: 'Coupon not found' });
+    res.json(coupon);
+  } catch (err) {
+    res.status(400).json({ msg: err.message });
+  }
+};
+
+exports.deleteCoupon = async (req, res) => {
+  try {
+    const coupon = await Coupon.findByIdAndUpdate(
+      req.params.id,
+      { isDeleted: true, isActive: false },
+      { new: true }
+    );
+    if (!coupon) return res.status(404).json({ msg: 'Coupon not found' });
+    res.json({ msg: 'Coupon removed successfully', id: req.params.id });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
   }
 };
 
@@ -730,12 +887,43 @@ exports.createBanner = async (req, res) => {
   }
 };
 
+exports.updateBanner = async (req, res) => {
+  try {
+    const banner = await Banner.findByIdAndUpdate(
+      req.params.id,
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!banner) return res.status(404).json({ msg: 'Banner not found' });
+    res.json(banner);
+  } catch (err) {
+    res.status(400).json({ msg: err.message });
+  }
+};
+
+exports.deleteBanner = async (req, res) => {
+  try {
+    const banner = await Banner.findByIdAndUpdate(
+      req.params.id,
+      { isDeleted: true, isActive: false },
+      { new: true }
+    );
+    if (!banner) return res.status(404).json({ msg: 'Banner not found' });
+    res.json({ msg: 'Banner removed successfully', id: req.params.id });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
 // ==========================================
 // 11. SUPPORT TICKETS DESK (Concept 20)
 // ==========================================
 exports.getSupportTickets = async (req, res) => {
   try {
-    const tickets = await SupportTicket.find().sort({ createdAt: -1 });
+    const tickets = await SupportTicket.find()
+      .populate('customerId', 'name email phone gender')
+      .populate('vendorId', 'name email phone businessName status')
+      .sort({ createdAt: -1 });
     res.json(tickets);
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -769,15 +957,56 @@ exports.replySupportTicket = async (req, res) => {
 // ==========================================
 exports.globalSearch = async (req, res) => {
   try {
-    const q = (req.query.q || '').trim();
-    if (!q) return res.json({ customers: [], vendors: [], products: [], orders: [] });
+    const rawQ = (req.query.q || '').trim();
+    if (!rawQ) return res.json({ customers: [], vendors: [], products: [], orders: [] });
 
-    const regex = new RegExp(q, 'i');
+    // Handle prefixed searches or clean terms
+    let cleanQ = rawQ.replace(/^(status:\s*|#)/i, '').trim();
+    const regex = new RegExp(cleanQ, 'i');
+
+    // Build specific filters for each collection
+    const customerFilter = {
+      isDeleted: { $ne: true },
+      $or: [
+        { name: regex },
+        { email: regex },
+        { phone: regex }
+      ]
+    };
+
+    const vendorFilter = {
+      isDeleted: { $ne: true },
+      $or: [
+        { name: regex },
+        { email: regex },
+        { phone: regex },
+        { businessName: regex },
+        { status: regex }
+      ]
+    };
+
+    const productFilter = {
+      isDeleted: { $ne: true },
+      $or: [
+        { name: regex },
+        { category: regex }
+      ]
+    };
+
+    const orderFilter = {
+      isDeleted: { $ne: true },
+      $or: [
+        { orderId: regex },
+        { invoiceId: regex },
+        { status: regex }
+      ]
+    };
+
     const [customers, vendors, products, orders] = await Promise.all([
-      Customer.find({ isDeleted: { $ne: true }, $or: [{ name: regex }, { email: regex }, { mobile: regex }] }).limit(5),
-      User.find({ isDeleted: { $ne: true }, $or: [{ name: regex }, { email: regex }] }).limit(5),
-      Product.find({ isDeleted: { $ne: true }, name: regex }).limit(5),
-      Order.find({ isDeleted: { $ne: true }, $or: [{ orderId: regex }, { invoiceId: regex }] }).limit(5)
+      Customer.find(customerFilter).limit(5).lean(),
+      User.find(vendorFilter).limit(5).lean(),
+      Product.find(productFilter).limit(5).lean(),
+      Order.find(orderFilter).limit(5).lean()
     ]);
 
     res.json({ customers, vendors, products, orders });
@@ -792,16 +1021,34 @@ exports.globalSearch = async (req, res) => {
 exports.getAuditLogs = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
+    const sortBy = req.query.sortBy || 'newest';
+    const entityType = req.query.entityType;
     const filter = {};
     if (req.query.q) {
       const regex = new RegExp(req.query.q, 'i');
       filter.$or = [{ action: regex }, { adminName: regex }, { details: regex }, { entityType: regex }];
     }
+    if (entityType && entityType !== 'all') {
+      filter.entityType = entityType;
+    }
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'action_asc') sortObj = { action: 1 };
+    else if (sortBy === 'admin_asc') sortObj = { adminName: 1 };
+
     const [items, total] = await Promise.all([
-      AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      AuditLog.find(filter).sort(sortObj).skip(skip).limit(limit).lean(),
       AuditLog.countDocuments(filter)
     ]);
-    res.json({ items, total, page, limit, hasMore: skip + items.length < total });
+    res.json({
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      hasMore: skip + items.length < total
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -931,14 +1178,26 @@ exports.getWalletsSummary = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
     const search = (req.query.q || '').trim();
+    const sortBy = req.query.sortBy || 'balance_desc';
+    const status = req.query.status;
+
     const query = { isDeleted: { $ne: true } };
     if (search) {
       const regex = new RegExp(search, 'i');
       query.$or = [{ name: regex }, { email: regex }, { mobile: regex }];
     }
+    if (status === 'blocked') query.isBlocked = true;
+    if (status === 'active') query.isBlocked = { $ne: true };
+
+    let sortObj = { 'wallet.balance': -1 };
+    if (sortBy === 'balance_asc') sortObj = { 'wallet.balance': 1 };
+    else if (sortBy === 'newest') sortObj = { createdAt: -1 };
+    else if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'name_asc') sortObj = { name: 1 };
+    else if (sortBy === 'name_desc') sortObj = { name: -1 };
 
     const [customers, total] = await Promise.all([
-      Customer.find(query).select('name email mobile wallet isBlocked createdAt').sort({ 'wallet.balance': -1 }).skip(skip).limit(limit).lean(),
+      Customer.find(query).select('name email mobile wallet isBlocked createdAt').sort(sortObj).skip(skip).limit(limit).lean(),
       Customer.countDocuments(query)
     ]);
 
@@ -953,6 +1212,7 @@ exports.getWalletsSummary = async (req, res) => {
       total,
       page,
       limit,
+      totalPages: Math.ceil(total / limit) || 1,
       hasMore: skip + customers.length < total,
       stats: {
         totalCustomerBalance: totalWalletBalance[0]?.total || 0,
@@ -971,17 +1231,26 @@ exports.getInvoicesList = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
     const search = (req.query.q || '').trim();
+    const sortBy = req.query.sortBy || 'newest';
+    const status = req.query.status;
+
     const query = { isDeleted: { $ne: true } };
     if (search) {
       const regex = new RegExp(search, 'i');
       query.$or = [{ orderId: regex }, { invoiceId: regex }, { 'deliveryAddress.fullName': regex }];
     }
+    if (status && status !== 'all') query.status = status;
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'amount_desc') sortObj = { totalAmount: -1 };
+    else if (sortBy === 'amount_asc') sortObj = { totalAmount: 1 };
 
     const [orders, total] = await Promise.all([
       Order.find(query)
         .populate('customerId', 'name email mobile')
         .populate('vendorId', 'name storeName email')
-        .sort({ createdAt: -1 })
+        .sort(sortObj)
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -1008,6 +1277,7 @@ exports.getInvoicesList = async (req, res) => {
       total,
       page,
       limit,
+      totalPages: Math.ceil(total / limit) || 1,
       hasMore: skip + invoices.length < total
     });
   } catch (err) {
@@ -1053,17 +1323,65 @@ exports.getReviewsList = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
     const search = (req.query.q || '').trim();
-    const query = {};
+    const status = req.query.status;
+    const rating = req.query.rating;
+    const sortBy = req.query.sortBy || 'newest';
+
+    const conditions = [];
+
     if (search) {
       const regex = new RegExp(search, 'i');
-      query.$or = [{ comment: regex }, { title: regex }];
+      // Find matching products and customers
+      const [matchingProducts, matchingUsers] = await Promise.all([
+        Product.find({ $or: [{ name: regex }, { category: regex }] }).select('_id'),
+        User.find({ $or: [{ name: regex }, { email: regex }] }).select('_id')
+      ]);
+
+      const prodIds = matchingProducts.map((p) => p._id);
+      const userIds = matchingUsers.map((u) => u._id);
+
+      const searchOr = [
+        { comment: regex },
+        { title: regex },
+        { customerName: regex }
+      ];
+
+      if (prodIds.length > 0) {
+        searchOr.push({ productId: { $in: prodIds } });
+      }
+      if (userIds.length > 0) {
+        searchOr.push({ customerId: { $in: userIds } });
+      }
+
+      conditions.push({ $or: searchOr });
     }
+
+    if (status && status !== 'all') {
+      if (status === 'approved') {
+        conditions.push({
+          $or: [{ status: 'approved' }, { status: { $exists: false } }, { status: null }]
+        });
+      } else {
+        conditions.push({ status });
+      }
+    }
+
+    if (rating && rating !== 'all') {
+      conditions.push({ rating: Number(rating) });
+    }
+
+    const query = conditions.length > 1 ? { $and: conditions } : conditions[0] || {};
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'rating_desc') sortObj = { rating: -1, createdAt: -1 };
+    else if (sortBy === 'rating_asc') sortObj = { rating: 1, createdAt: -1 };
 
     const [reviews, total] = await Promise.all([
       Review.find(query)
         .populate('customerId', 'name email')
         .populate('productId', 'name image price category')
-        .sort({ createdAt: -1 })
+        .sort(sortObj)
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -1085,7 +1403,12 @@ exports.getReviewsList = async (req, res) => {
 exports.moderateReview = async (req, res) => {
   try {
     const { status } = req.body;
-    const review = await Review.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    const review = await Review.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { returnDocument: 'after' }
+    );
+    if (!review) return res.status(404).json({ msg: 'Review not found' });
     res.json({ msg: `Review updated to ${status}`, review });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -1098,11 +1421,35 @@ exports.moderateReview = async (req, res) => {
 exports.getNotificationsList = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
+    const q = (req.query.q || '').trim();
+    const type = req.query.type;
+    const target = req.query.target;
+    const sortBy = req.query.sortBy || 'newest';
+
+    const filter = {};
+    if (q) {
+      const regex = new RegExp(q, 'i');
+      filter.$or = [{ title: regex }, { message: regex }];
+    }
+    if (type && type !== 'all') filter.type = type;
+    if (target && target !== 'all') filter.userType = target;
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'title_asc') sortObj = { title: 1 };
+
     const [items, total] = await Promise.all([
-      Notification.find().sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Notification.countDocuments()
+      Notification.find(filter).sort(sortObj).skip(skip).limit(limit).lean(),
+      Notification.countDocuments(filter)
     ]);
-    res.json({ items, total, page, limit, hasMore: skip + items.length < total });
+    res.json({
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      hasMore: skip + items.length < total
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -1242,16 +1589,17 @@ exports.getVendorAnalytics = async (req, res) => {
 exports.getInventoryAnalytics = async (req, res) => {
   try {
     const products = await Product.find({ isDeleted: { $ne: true } }).lean();
-    const totalStock = products.reduce((s, p) => s + (p.stock || 0), 0);
-    const totalValuation = products.reduce((s, p) => s + ((p.stock || 0) * (p.price || 0)), 0);
-    const lowStockItems = products.filter(p => (p.stock || 0) <= 5);
-    const outOfStockItems = products.filter(p => (p.stock || 0) === 0);
+    const getQty = (p) => (p.quantity !== undefined ? p.quantity : (p.stock !== undefined ? p.stock : 0));
+    const totalStock = products.reduce((s, p) => s + getQty(p), 0);
+    const totalValuation = products.reduce((s, p) => s + (getQty(p) * (p.price || 0)), 0);
+    const lowStockItems = products.filter(p => getQty(p) <= 10 && getQty(p) > 0);
+    const outOfStockItems = products.filter(p => getQty(p) <= 0);
 
     // Stock by category
     const categoryMap = {};
     products.forEach(p => {
       const cat = p.category || 'General';
-      categoryMap[cat] = (categoryMap[cat] || 0) + (p.stock || 0);
+      categoryMap[cat] = (categoryMap[cat] || 0) + getQty(p);
     });
 
     const categoryBreakdown = Object.entries(categoryMap).map(([category, count]) => ({ category, count }));
@@ -1262,7 +1610,7 @@ exports.getInventoryAnalytics = async (req, res) => {
       totalValuation,
       lowStockCount: lowStockItems.length,
       outOfStockCount: outOfStockItems.length,
-      lowStockItems: lowStockItems.slice(0, 15),
+      lowStockItems: lowStockItems.slice(0, 15).map(p => ({ ...p, stock: getQty(p) })),
       categoryBreakdown
     });
   } catch (err) {
@@ -1279,13 +1627,63 @@ exports.generateReport = async (req, res) => {
     let data = [];
 
     if (type === 'orders') {
-      data = await Order.find({ isDeleted: { $ne: true } }).select('orderId totalAmount status paymentMethod createdAt').lean();
+      const orders = await Order.find({ isDeleted: { $ne: true } })
+        .sort({ createdAt: -1 })
+        .lean();
+      data = orders.map((o) => ({
+        'Order ID': o.orderId || String(o._id).slice(-10).toUpperCase(),
+        'Invoice ID': o.invoiceId || '—',
+        'Total Amount (₹)': Number(o.totalAmount || o.price || 0),
+        'Status': (o.status || 'placed').toUpperCase(),
+        'Items Count': Array.isArray(o.items) ? o.items.length : (o.qty || 1),
+        'Payment Method': (o.paymentMethod || 'Online').toUpperCase(),
+        'Date': new Date(o.createdAt).toLocaleDateString('en-IN')
+      }));
     } else if (type === 'customers') {
-      data = await Customer.find({ isDeleted: { $ne: true } }).select('name email mobile wallet.balance createdAt').lean();
+      const customers = await Customer.find({ isDeleted: { $ne: true } })
+        .sort({ createdAt: -1 })
+        .lean();
+      data = customers.map((c) => ({
+        'Customer Name': c.name || '—',
+        'Email Address': c.email || '—',
+        'Mobile Phone': c.phone || c.mobile || '—',
+        'Wallet Balance (₹)': Number(c.wallet?.balance || 0),
+        'Account Status': c.isBlocked ? 'BLOCKED' : 'ACTIVE',
+        'Registered Date': new Date(c.createdAt).toLocaleDateString('en-IN')
+      }));
     } else if (type === 'inventory') {
-      data = await Product.find({ isDeleted: { $ne: true } }).select('name sku price stock category').lean();
+      const products = await Product.find({ isDeleted: { $ne: true } })
+        .sort({ category: 1, name: 1 })
+        .lean();
+      data = products.map((p) => {
+        const units = p.quantity !== undefined ? p.quantity : (p.stock || 0);
+        const unitPrice = Number(p.price || 0);
+        return {
+          'Product Name': p.name || '—',
+          'Category': p.category || 'General',
+          'Stock Units': units,
+          'Unit Price (₹)': unitPrice,
+          'Total Value (₹)': units * unitPrice,
+          'Stock Status': units <= 0 ? 'OUT OF STOCK' : units <= 10 ? 'LOW STOCK' : 'IN STOCK'
+        };
+      });
     } else {
-      data = await Transaction.find().sort({ createdAt: -1 }).limit(200).lean();
+      const txns = await Transaction.find()
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .populate('customerId', 'name email')
+        .lean();
+      data = txns.map((t) => ({
+        'Transaction ID': t.orderDisplayId || String(t._id).slice(-10).toUpperCase(),
+        'Customer': t.customerId?.name || 'Customer',
+        'Email': t.customerId?.email || '—',
+        'Type': (t.type || 'transaction').replace(/_/g, ' ').toUpperCase(),
+        'Direction': (t.direction || 'credit').toUpperCase(),
+        'Amount (₹)': Number(t.amount || 0),
+        'Status': (t.status || 'success').toUpperCase(),
+        'Payment Method': (t.paymentMethod || 'Wallet').toUpperCase(),
+        'Date': new Date(t.createdAt).toLocaleDateString('en-IN')
+      }));
     }
 
     res.json({
@@ -1327,6 +1725,146 @@ exports.createAdminUser = async (req, res) => {
     res.status(201).json({ msg: 'Admin user created successfully', admin: { _id: newAdmin._id, name: newAdmin.name, email: newAdmin.email, role: newAdmin.role } });
   } catch (err) {
     res.status(400).json({ msg: err.message });
+  }
+};
+
+// Request Email OTP for editing default admin (name, email, or password)
+exports.requestAdminPasswordOtp = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!admin) return res.status(404).json({ msg: 'Admin not found' });
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpKey = `pwd_${admin.email.toLowerCase().trim()}`;
+    adminOtpStore.set(otpKey, {
+      otp,
+      adminId: admin._id,
+      expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+    });
+
+    await emailService.sendOtpEmail({
+      email: admin.email,
+      name: admin.name || 'Master Admin',
+      otp,
+      purpose: 'Default Admin Profile & Security Update'
+    });
+
+    res.json({ msg: `Verification OTP sent to registered email (${admin.email})`, email: admin.email });
+  } catch (err) {
+    res.status(500).json({ msg: 'Failed to send verification code: ' + err.message });
+  }
+};
+
+exports.updateAdminUser = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!admin) return res.status(404).json({ msg: 'Admin not found' });
+
+    const isDefault = admin.isDefault || String(admin._id) === '69cbebc1afbc23659cc20bd4';
+    const { name, email, role, password, otp } = req.body;
+    const bcrypt = require('bcryptjs');
+
+    // For default admin, ANY edit (name, email, or password) requires email OTP verification
+    if (isDefault) {
+      if (!otp) {
+        return res.status(400).json({ msg: 'Email OTP verification is required to update the default administrator account' });
+      }
+      const otpKey = `pwd_${admin.email.toLowerCase().trim()}`;
+      const record = adminOtpStore.get(otpKey);
+      if (!record || Date.now() > record.expiresAt || record.otp !== String(otp).trim()) {
+        return res.status(400).json({ msg: 'Invalid or expired OTP verification code' });
+      }
+      adminOtpStore.delete(otpKey);
+    }
+
+    // Password change handling
+    if (password && password.trim()) {
+      if (password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+      admin.password = await bcrypt.hash(password.trim(), 10);
+    }
+
+    if (name) admin.name = name.trim();
+    if (email && email.toLowerCase().trim() !== admin.email) {
+      const existing = await Admin.findOne({ email: email.toLowerCase().trim(), _id: { $ne: admin._id }, isDeleted: { $ne: true } });
+      if (existing) return res.status(400).json({ msg: 'Email is already used by another administrator' });
+      admin.email = email.toLowerCase().trim();
+    }
+    if (role && !isDefault) admin.role = role;
+
+    await admin.save();
+    await logAudit(req.admin?.id, req.admin?.name, 'UPDATE_ADMIN', 'admin', admin._id, `Updated admin user ${admin.email}`);
+
+    res.json({
+      msg: 'Admin user updated successfully',
+      admin: {
+        _id: admin._id,
+        name: admin.name,
+        email: admin.email,
+        role: admin.role,
+        isDefault: Boolean(admin.isDefault)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.deleteAdminUser = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!admin) return res.status(404).json({ msg: 'Admin not found' });
+
+    const isDefault = admin.isDefault || String(admin._id) === '69cbebc1afbc23659cc20bd4';
+    if (isDefault) {
+      return res.status(403).json({ msg: 'Action prohibited: The primary default administrator cannot be removed' });
+    }
+
+    admin.isDeleted = true;
+    await admin.save();
+    await logAudit(req.admin?.id, req.admin?.name, 'DELETE_ADMIN', 'admin', admin._id, `Removed admin user ${admin.email}`);
+
+    res.json({ msg: 'Admin user removed successfully' });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.toggleAdminBlock = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!admin) return res.status(404).json({ msg: 'Admin not found' });
+
+    const isDefault = admin.isDefault || String(admin._id) === '69cbebc1afbc23659cc20bd4' || admin.email === 'jkarumajji@gmail.com';
+    if (isDefault) {
+      return res.status(403).json({ msg: 'Action prohibited: Default administrator access cannot be blocked' });
+    }
+
+    // Toggle block status
+    admin.isBlocked = !admin.isBlocked;
+    await admin.save();
+
+    await logAudit(
+      req.admin?.id,
+      req.admin?.name,
+      admin.isBlocked ? 'BLOCK_ADMIN' : 'UNBLOCK_ADMIN',
+      'admin',
+      admin._id,
+      `${admin.isBlocked ? 'Blocked' : 'Unblocked'} admin account ${admin.email}`
+    );
+
+    res.json({
+      msg: `Admin user ${admin.email} is now ${admin.isBlocked ? 'blocked' : 'active'}`,
+      admin: {
+        _id: admin._id,
+        name: admin.name,
+        email: admin.email,
+        role: admin.role,
+        isBlocked: admin.isBlocked,
+        isDefault: false
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
   }
 };
 
@@ -1383,15 +1921,31 @@ exports.getSecurityOverview = async (req, res) => {
 exports.getActivityFeed = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req);
-    const audits = await AuditLog.find().sort({ createdAt: -1 }).skip(skip).limit(limit).lean();
-    const total = await AuditLog.countDocuments();
+    const q = (req.query.q || '').trim();
+    const sortBy = req.query.sortBy || 'newest';
+
+    const filter = {};
+    if (q) {
+      const regex = new RegExp(q, 'i');
+      filter.$or = [{ action: regex }, { adminName: regex }, { details: regex }, { entityType: regex }];
+    }
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === 'oldest') sortObj = { createdAt: 1 };
+    else if (sortBy === 'action_asc') sortObj = { action: 1 };
+
+    const [items, total] = await Promise.all([
+      AuditLog.find(filter).sort(sortObj).skip(skip).limit(limit).lean(),
+      AuditLog.countDocuments(filter)
+    ]);
 
     res.json({
-      items: audits,
+      items,
       total,
       page,
       limit,
-      hasMore: skip + audits.length < total
+      totalPages: Math.ceil(total / limit) || 1,
+      hasMore: skip + items.length < total
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -1425,14 +1979,16 @@ exports.triggerScheduledEmails = async (req, res) => {
   try {
     const { type = 'monthly', force = true } = req.body || {};
     let result;
-    if (type === 'monthly') {
+    if (type === 'daily_vendor' || type === 'daily') {
+      result = await emailCronService.dispatchDailyVendorDigests(force);
+    } else if (type === 'monthly') {
       result = await emailCronService.dispatchMonthlyEmails(force);
     } else if (type === 'six_month') {
       result = await emailCronService.dispatchSixMonthEmails(force);
     } else if (type === 'annual') {
       result = await emailCronService.dispatchAnnualEmails(force);
     } else {
-      return res.status(400).json({ msg: 'Invalid schedule type. Must be "monthly", "six_month", or "annual".' });
+      return res.status(400).json({ msg: 'Invalid schedule type. Must be "daily_vendor", "monthly", "six_month", or "annual".' });
     }
 
     await logAudit(req.adminId, req.admin?.name, `TRIGGER_${type.toUpperCase()}_EMAILS`, 'cron_service', type, `Admin manually triggered ${type} emails`);

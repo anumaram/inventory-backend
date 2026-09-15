@@ -60,6 +60,13 @@ exports.login = async (req, res) => {
     return res.status(401).json({ msg: 'Invalid credentials' });
   }
 
+  if (admin.isBlocked) {
+    return res.status(403).json({
+      msg: 'Your administrator account has been blocked. Please contact the primary super administrator.',
+      accountBlocked: true
+    });
+  }
+
   const token = jwt.sign({ id: admin._id, type: 'admin' }, JWT_SECRET);
   res.json({ token });
 };
@@ -188,17 +195,29 @@ exports.getVendors = async (req, res) => {
 
 exports.updateVendor = async (req, res) => {
   const updates = {};
-  if (req.body?.name) updates.name = req.body.name;
-  if (req.body?.email) updates.email = req.body.email;
+  if (req.body?.name) updates.name = req.body.name.trim();
+  if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
+  if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
+  if (req.body?.businessName !== undefined) updates.businessName = req.body.businessName.trim();
+  if (req.body?.password) {
+    if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+    updates.password = await bcrypt.hash(req.body.password, 10);
+  }
+
   if (!Object.keys(updates).length) {
     return res.status(400).json({ msg: 'No updates provided' });
   }
 
+  if (updates.email) {
+    const existing = await User.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
+    if (existing) return res.status(400).json({ msg: 'Email is already used by another vendor' });
+  }
+
   const vendor = await User.findOneAndUpdate(
     { _id: req.params.id, isDeleted: { $ne: true } },
-    updates,
+    { $set: updates },
     { returnDocument: 'after' }
-  );
+  ).select('-password -otp');
 
   if (!vendor) {
     return res.status(404).json({ msg: 'Vendor not found' });
@@ -233,7 +252,7 @@ exports.getCustomers = async (req, res) => {
   const pipeline = [
     { $match: match },
     { $sort: { createdAt: -1 } },
-    { $project: { _id: 1, name: 1, email: 1, createdAt: 1 } }
+    { $project: { _id: 1, name: 1, email: 1, phone: 1, isBlocked: 1, wallet: 1, createdAt: 1 } }
   ];
 
   res.json(await getPagedAggregate(Customer, pipeline, page, limit));
@@ -241,17 +260,29 @@ exports.getCustomers = async (req, res) => {
 
 exports.updateCustomer = async (req, res) => {
   const updates = {};
-  if (req.body?.name) updates.name = req.body.name;
-  if (req.body?.email) updates.email = req.body.email;
+  if (req.body?.name) updates.name = req.body.name.trim();
+  if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
+  if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
+  if (req.body?.gender !== undefined) updates.gender = req.body.gender;
+  if (req.body?.password) {
+    if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+    updates.password = await bcrypt.hash(req.body.password, 10);
+  }
+
   if (!Object.keys(updates).length) {
     return res.status(400).json({ msg: 'No updates provided' });
   }
 
+  if (updates.email) {
+    const existing = await Customer.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
+    if (existing) return res.status(400).json({ msg: 'Email is already used by another customer' });
+  }
+
   const customer = await Customer.findOneAndUpdate(
     { _id: req.params.id, isDeleted: { $ne: true } },
-    updates,
+    { $set: updates },
     { returnDocument: 'after' }
-  );
+  ).select('-password -otp');
 
   if (!customer) {
     return res.status(404).json({ msg: 'Customer not found' });
@@ -277,10 +308,24 @@ exports.deleteCustomer = async (req, res) => {
 exports.getProducts = async (req, res) => {
   const { page, limit } = parsePagination(req);
   const q = (req.query.q || '').toString().trim();
+  const category = (req.query.category || '').toString().trim();
+  const stockStatus = (req.query.stockStatus || '').toString().trim();
   const regex = q ? new RegExp(escapeRegExp(q), 'i') : null;
 
+  const matchInitial = { isDeleted: { $ne: true } };
+  if (category && category !== 'all') {
+    matchInitial.category = { $regex: new RegExp(`^${escapeRegExp(category)}$`, 'i') };
+  }
+  if (stockStatus === 'in_stock') {
+    matchInitial.quantity = { $gt: 10 };
+  } else if (stockStatus === 'low_stock') {
+    matchInitial.quantity = { $gt: 0, $lte: 10 };
+  } else if (stockStatus === 'out_of_stock') {
+    matchInitial.quantity = { $lte: 0 };
+  }
+
   const base = [
-    { $match: { isDeleted: { $ne: true } } },
+    { $match: matchInitial },
     {
       $lookup: {
         from: 'users',
@@ -301,14 +346,25 @@ exports.getProducts = async (req, res) => {
     ? { $match: { $or: [{ name: regex }, { vendorName: regex }] } }
     : null;
 
+  const sortBy = (req.query.sortBy || 'newest').toString().trim();
+  let sortStage = { createdAt: -1 };
+  if (sortBy === 'oldest') sortStage = { createdAt: 1 };
+  else if (sortBy === 'price_asc') sortStage = { price: 1 };
+  else if (sortBy === 'price_desc') sortStage = { price: -1 };
+  else if (sortBy === 'stock_asc') sortStage = { quantity: 1 };
+  else if (sortBy === 'stock_desc') sortStage = { quantity: -1 };
+  else if (sortBy === 'name_asc') sortStage = { name: 1 };
+  else if (sortBy === 'name_desc') sortStage = { name: -1 };
+
   const pipeline = [
     ...base,
     ...(matchStage ? [matchStage] : []),
-    { $sort: { createdAt: -1 } },
+    { $sort: sortStage },
     {
       $project: {
         _id: 1,
         name: 1,
+        category: 1,
         quantity: 1,
         price: 1,
         userId: 1,

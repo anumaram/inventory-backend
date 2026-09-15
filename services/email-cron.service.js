@@ -253,30 +253,97 @@ async function dispatchAnnualEmails(force = false) {
 }
 
 /**
+ * 3B. Dispatch Daily End-of-Day Digest to All Active Vendors
+ */
+async function dispatchDailyVendorDigests(force = false) {
+  const now = new Date();
+  const dateKey = now.toISOString().slice(0, 10);
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+  if (!force && await hasJobRun('CRON_DAILY_VENDOR_DIGEST', dateKey)) {
+    console.log(`[EmailCron] Daily vendor digest already sent for ${dateKey}. Skipping.`);
+    return { skipped: true, period: dateKey };
+  }
+
+  console.log(`[EmailCron] Starting Daily Vendor Digest Dispatch for ${dateKey}...`);
+  let dispatched = 0;
+
+  try {
+    const Return = require('../models/return.model');
+    const vendors = await User.find({ isDeleted: { $ne: true } });
+
+    for (const v of vendors) {
+      // Find orders placed today for this vendor
+      const orders = await Order.find({
+        vendorId: v._id,
+        isDeleted: { $ne: true },
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
+      }).lean();
+
+      // Find transactions today for this vendor
+      const txns = await VendorTransaction.find({
+        vendorId: v._id,
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
+      }).lean();
+
+      // Find returns updated/requested today for this vendor
+      const returns = await Return.find({
+        vendorId: v._id,
+        isDeleted: { $ne: true },
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
+      }).lean();
+
+      await emailService.sendDailyVendorDigestEmail({
+        vendor: v,
+        orders,
+        transactions: txns,
+        returns,
+        dateStr: now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })
+      });
+      dispatched++;
+    }
+
+    await recordJobRun('CRON_DAILY_VENDOR_DIGEST', dateKey, `Dispatched daily digest to ${dispatched} active vendor(s)`);
+    console.log(`[EmailCron] Finished daily vendor digest for ${dispatched} vendors.`);
+    return { success: true, count: dispatched, period: dateKey };
+  } catch (err) {
+    console.error('[EmailCron] Error dispatching daily vendor digests:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * 4. Start the Background Cron Scheduler
- * Checks every hour to see if 1st of month, 6 months, or 1 year is reached.
+ * Checks every hour to see if 1st of month, 6 months, 1 year, or 21:00 EOD daily is reached.
  */
 function startEmailCronScheduler() {
-  console.log('[EmailCron] Automated Email Schedulers Initialized (Monthly 1st, 6-Month H1/H2, 1-Year Annual)');
+  console.log('[EmailCron] Automated Email Schedulers Initialized (Daily 21:00, Monthly 1st, 6-Month H1/H2, 1-Year Annual)');
 
   const checkSchedules = async () => {
     try {
       const now = new Date();
       const date = now.getDate();
       const month = now.getMonth(); // 0-11
+      const hour = now.getHours();
+
+      // Daily at 9:00 PM (hour 21): trigger vendor daily EOD digest
+      if (hour === 21) {
+        await dispatchDailyVendorDigests(false);
+      }
 
       // 1st of every month: trigger monthly statements
-      if (date === 1) {
+      if (date === 1 && hour === 8) {
         await dispatchMonthlyEmails(false);
       }
 
       // 1st of January (0) or 1st of July (6): trigger 6-month review
-      if (date === 1 && (month === 0 || month === 6)) {
+      if (date === 1 && (month === 0 || month === 6) && hour === 9) {
         await dispatchSixMonthEmails(false);
       }
 
       // 1st of January: trigger annual review
-      if (date === 1 && month === 0) {
+      if (date === 1 && month === 0 && hour === 10) {
         await dispatchAnnualEmails(false);
       }
     } catch (err) {
@@ -287,14 +354,15 @@ function startEmailCronScheduler() {
   // Run initial check
   checkSchedules();
 
-  // Check every hour (3600000 ms)
-  const interval = setInterval(checkSchedules, 60 * 60 * 1000);
+  // Check every 30 minutes (1800000 ms)
+  const interval = setInterval(checkSchedules, 30 * 60 * 1000);
   interval.unref?.();
   return interval;
 }
 
 module.exports = {
   startEmailCronScheduler,
+  dispatchDailyVendorDigests,
   dispatchMonthlyEmails,
   dispatchSixMonthEmails,
   dispatchAnnualEmails

@@ -17,6 +17,7 @@ router.get('/dashboard-data', adminAuth, ext.getDashboardData);
 
 // 3. Customers
 router.get('/customers', adminAuth, ext.getCustomersList);
+router.get('/customers/:id', adminAuth, ext.getCustomerDetails);
 router.patch('/customers/:id', adminAuth, adminService.updateCustomer);
 router.delete('/customers/:id', adminAuth, adminService.deleteCustomer);
 router.post('/customers/:id/toggle-block', adminAuth, ext.toggleCustomerBlock);
@@ -62,11 +63,15 @@ router.get('/wallets', adminAuth, ext.getWalletsSummary);
 // 10. Marketing: Coupons, Promotions & Banners
 router.get('/coupons', adminAuth, ext.getCoupons);
 router.post('/coupons', adminAuth, ext.createCoupon);
+router.patch('/coupons/:id', adminAuth, ext.updateCoupon);
+router.delete('/coupons/:id', adminAuth, ext.deleteCoupon);
 router.get('/promotions', adminAuth, ext.getPromotions);
 router.post('/promotions', adminAuth, ext.createPromotion);
 router.delete('/promotions/:id', adminAuth, ext.deletePromotion);
 router.get('/banners', adminAuth, ext.getBanners);
 router.post('/banners', adminAuth, ext.createBanner);
+router.patch('/banners/:id', adminAuth, ext.updateBanner);
+router.delete('/banners/:id', adminAuth, ext.deleteBanner);
 
 // 11. Reviews Moderation & Support Tickets
 router.get('/reviews', adminAuth, ext.getReviewsList);
@@ -88,6 +93,10 @@ router.get('/reports/generate', adminAuth, ext.generateReport);
 // 14. Admin Users, Roles & Permissions
 router.get('/admin-users', adminAuth, ext.getAdminUsers);
 router.post('/admin-users', adminAuth, ext.createAdminUser);
+router.post('/admin-users/:id/password-otp', adminAuth, ext.requestAdminPasswordOtp);
+router.patch('/admin-users/:id', adminAuth, ext.updateAdminUser);
+router.post('/admin-users/:id/toggle-block', adminAuth, ext.toggleAdminBlock);
+router.delete('/admin-users/:id', adminAuth, ext.deleteAdminUser);
 router.get('/roles', adminAuth, ext.getAdminRoles);
 router.post('/roles', adminAuth, ext.createAdminRole);
 router.patch('/roles/:id', adminAuth, ext.updateAdminRole);

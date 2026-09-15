@@ -5,6 +5,7 @@ const Product = require('../models/product.model');
 const Address = require('../models/address.model');
 const Customer = require('../models/customer.model');
 const User = require('../models/user.model');
+const StoreSettings = require('../models/store-settings.model');
 const { generateOrderId } = require('../utils/orderId.util');
 const { generateInvoiceId } = require('../utils/invoiceId.util');
 const { createTransaction } = require('./transaction.service');
@@ -242,39 +243,62 @@ exports.checkoutCart = async (req, res) => {
     const effectivePrice = Math.round(Number(product?.price || 0) * (1 - disc / 100));
     return total + effectivePrice * item.qty;
   }, 0);
-  const couponRules = {
-    HUB10: { type: 'percent', value: 10, cap: 5000 },
-    SHOP50: { type: 'flat', value: 50, minimum: 999 },
-    WELCOME100: { type: 'flat', value: 100 },
-    FREESHIP: { type: 'shipping', value: 0, minimum: 499 }
-  };
-  const couponCode = String(req.body?.couponCode || '').toUpperCase();
-  let coupon = couponRules[couponCode];
-  if (!coupon && couponCode) {
+  const couponCode = String(req.body?.couponCode || '').trim().toUpperCase();
+  let coupon = null;
+  if (couponCode) {
     try {
       const Coupon = require('../models/coupon.model');
-      const dbCoupon = await Coupon.findOne({ code: couponCode, isActive: true, isDeleted: { $ne: true } });
+      const now = new Date();
+      const dbCoupon = await Coupon.findOne({
+        code: couponCode,
+        isActive: true,
+        isDeleted: { $ne: true },
+        $or: [{ expiryDate: { $gte: now } }, { expiryDate: null }]
+      });
       if (dbCoupon) {
+        if (dbCoupon.usageLimit && Number(dbCoupon.usageCount || 0) >= Number(dbCoupon.usageLimit)) {
+          return res.status(400).json({ msg: 'This coupon usage limit has been reached' });
+        }
         coupon = {
-          type: dbCoupon.discountType === 'percentage' ? 'percent' : 'flat',
-          value: dbCoupon.discountValue,
-          minimum: dbCoupon.minOrderAmount,
-          cap: dbCoupon.maxDiscountAmount || Infinity
+          code: dbCoupon.code,
+          type: dbCoupon.discountType === 'percentage' ? 'percent' : (dbCoupon.code === 'FREESHIP' ? 'shipping' : 'flat'),
+          value: Number(dbCoupon.discountValue || 0),
+          minimum: Number(dbCoupon.minOrderAmount || 0),
+          cap: dbCoupon.maxDiscountAmount ? Number(dbCoupon.maxDiscountAmount) : Infinity,
+          dbId: dbCoupon._id
         };
+      } else {
+        return res.status(400).json({ msg: 'Invalid or expired coupon code' });
       }
-    } catch {
-      // non-blocking
+    } catch (err) {
+      console.warn('Coupon verification failed:', err.message);
     }
   }
+
   if (coupon && coupon.minimum && subtotal < coupon.minimum) {
-    return res.status(400).json({ msg: 'Coupon minimum order value was not met' });
+    return res.status(400).json({ msg: `Coupon requires minimum order value of ₹${coupon.minimum}` });
   }
   const couponDiscount = coupon?.type === 'percent'
     ? Math.min(Math.round(subtotal * coupon.value / 100), coupon.cap)
     : coupon?.type === 'flat'
       ? coupon.value
       : 0;
-  const rawDeliveryFee = req.body?.deliveryMethod === 'express' ? 99 : 0;
+
+  // Retrieve live platform settings
+  let liveSettings = null;
+  try {
+    liveSettings = await StoreSettings.findOne();
+  } catch {}
+  const freeThreshold = Number(liveSettings?.freeShippingThreshold ?? 499);
+  const standardFee = Number(liveSettings?.defaultDeliveryFee ?? 40);
+
+  let rawDeliveryFee = 0;
+  if (req.body?.deliveryMethod === 'express') {
+    rawDeliveryFee = 99;
+  } else {
+    rawDeliveryFee = subtotal >= freeThreshold ? 0 : standardFee;
+  }
+
   const deliveryFee = coupon?.type === 'shipping' ? 0 : rawDeliveryFee;
   const orderTotal = Math.max(0, subtotal + deliveryFee - couponDiscount);
   let walletCustomer;
@@ -482,10 +506,11 @@ exports.checkoutCart = async (req, res) => {
     const { createTransaction } = require('./transaction.service');
     const { createVendorTransaction } = require('./vendor-transaction.service');
     const custInfo = await Customer.findById(req.customerId).select('name');
+    const commRatePercent = Number(liveSettings?.defaultCommissionRate ?? liveSettings?.commissionRate ?? 5);
     for (const order of createdOrders) {
       const oId = order.orderId || `ORD-${String(order._id).slice(-8).toUpperCase()}`;
       const total = Number(order.totalAmount || 0);
-      const commission = Math.round(total * 0.05);
+      const commission = Math.round((total * commRatePercent) / 100);
       const netAmount = total - commission;
       const firstItem = order.items?.[0] || {};
       const prodName = firstItem.name || 'Product Item';

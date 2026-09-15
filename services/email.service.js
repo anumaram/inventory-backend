@@ -766,6 +766,152 @@ async function sendAnnualReviewEmail({ recipient, userType = 'customer', metrics
   }
 }
 
+/**
+ * 10. Send End-of-Day Daily Merchant Digest Email to Vendor
+ * Summarizes today's orders, revenue, commission, and returns/refunds
+ */
+async function sendDailyVendorDigestEmail({ vendor, orders = [], transactions = [], returns = [], dateStr = '' }) {
+  if (!vendor?.email) return;
+
+  const displayDate = dateStr || new Date().toLocaleDateString('en-IN', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+
+  const totalOrders = orders.length;
+  const grossSales = orders.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
+  const totalCommission = grossSales * 0.05;
+  const netEarnings = Math.max(0, grossSales - totalCommission);
+
+  const totalRefundDeductions = transactions
+    .filter(t => t.type === 'refund_deduction')
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+
+  const orderRowsHtml = orders.slice(0, 10).map(o => {
+    const oId = o.orderId || (o._id ? String(o._id).slice(-8).toUpperCase() : 'ORD');
+    const itCount = Array.isArray(o.items) ? o.items.length : 1;
+    return `
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 9px 12px; font-size: 13px; font-weight: 600; color: #0f172a;">#${oId}</td>
+        <td style="padding: 9px 12px; font-size: 13px; color: #475569;">${itCount} item(s)</td>
+        <td style="padding: 9px 12px; font-size: 13px; text-transform: uppercase; color: #2563eb;">${o.paymentMethod || 'ONLINE'}</td>
+        <td style="padding: 9px 12px; text-align: right; font-weight: 700; color: #16a34a; font-size: 13px;">${formatINR(o.totalAmount)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const returnRowsHtml = returns.slice(0, 5).map(r => `
+    <tr style="border-bottom: 1px solid #fee2e2;">
+      <td style="padding: 8px 12px; font-size: 12.5px; font-weight: 600; color: #991b1b;">#${r.orderId || 'RET'}</td>
+      <td style="padding: 8px 12px; font-size: 12.5px; color: #7f1d1d;">${r.reason || 'Customer Return'}</td>
+      <td style="padding: 8px 12px; text-align: right; font-weight: 700; color: #dc2626; font-size: 12.5px;">-${formatINR(r.refundAmount || r.totalAmount || 0)}</td>
+    </tr>
+  `).join('');
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <body style="margin: 0; padding: 20px; background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+      <div style="max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 14px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.06);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 30px 28px; color: #ffffff; text-align: center;">
+          <div style="font-size: 32px; margin-bottom: 6px;">🌅</div>
+          <h1 style="margin: 0 0 6px; font-size: 22px; font-weight: 800;">End of Day Merchant Digest</h1>
+          <p style="margin: 0; font-size: 14px; color: #cbd5e1;">${displayDate} • Hello, ${vendor.name || 'Vendor Partner'}</p>
+        </div>
+
+        <div style="padding: 24px 28px;">
+          <!-- Headline Stats Grid -->
+          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px;">
+            <div style="padding: 14px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px;">
+              <span style="font-size: 11px; font-weight: 700; color: #065f46; text-transform: uppercase;">Today's Orders (${totalOrders})</span>
+              <div style="font-size: 20px; font-weight: 800; color: #047857; margin-top: 4px;">${formatINR(grossSales)}</div>
+            </div>
+            <div style="padding: 14px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px;">
+              <span style="font-size: 11px; font-weight: 700; color: #1e40af; text-transform: uppercase;">Estimated Net Payout</span>
+              <div style="font-size: 20px; font-weight: 800; color: #2563eb; margin-top: 4px;">${formatINR(netEarnings)}</div>
+            </div>
+            <div style="padding: 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;">
+              <span style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase;">Platform Fee (5%)</span>
+              <div style="font-size: 18px; font-weight: 800; color: #334155; margin-top: 4px;">${formatINR(totalCommission)}</div>
+            </div>
+            <div style="padding: 14px; background: ${totalRefundDeductions > 0 ? '#fef2f2' : '#f8fafc'}; border: 1px solid ${totalRefundDeductions > 0 ? '#fecaca' : '#e2e8f0'}; border-radius: 10px;">
+              <span style="font-size: 11px; font-weight: 700; color: ${totalRefundDeductions > 0 ? '#991b1b' : '#64748b'}; text-transform: uppercase;">Refund Deductions</span>
+              <div style="font-size: 18px; font-weight: 800; color: ${totalRefundDeductions > 0 ? '#dc2626' : '#334155'}; margin-top: 4px;">${formatINR(totalRefundDeductions)}</div>
+            </div>
+          </div>
+
+          <!-- Orders Section -->
+          <h3 style="margin: 0 0 10px; font-size: 15px; color: #0f172a;">Today's Orders & Invoices (${totalOrders})</h3>
+          ${totalOrders === 0 ? `
+            <div style="padding: 14px; background: #f8fafc; border-radius: 8px; border: 1px dashed #cbd5e1; text-align: center; color: #64748b; font-size: 13px; margin-bottom: 20px;">
+              No customer orders received today. Your store is active and catalog is live.
+            </div>
+          ` : `
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+              <thead>
+                <tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0;">
+                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; color: #64748b; text-transform: uppercase;">Order</th>
+                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; color: #64748b; text-transform: uppercase;">Items</th>
+                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; color: #64748b; text-transform: uppercase;">Payment</th>
+                  <th style="padding: 8px 12px; text-align: right; font-size: 11px; color: #64748b; text-transform: uppercase;">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${orderRowsHtml}
+              </tbody>
+            </table>
+          `}
+
+          <!-- Returns Section if any -->
+          ${returns.length > 0 ? `
+            <h3 style="margin: 0 0 10px; font-size: 15px; color: #991b1b;">Today's Returns & Refunds (${returns.length})</h3>
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; background: #fff5f5; border-radius: 8px;">
+              <thead>
+                <tr style="border-bottom: 1.5px solid #fecaca;">
+                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; color: #991b1b; text-transform: uppercase;">Order</th>
+                  <th style="padding: 8px 12px; text-align: left; font-size: 11px; color: #991b1b; text-transform: uppercase;">Reason</th>
+                  <th style="padding: 8px 12px; text-align: right; font-size: 11px; color: #991b1b; text-transform: uppercase;">Deduction</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${returnRowsHtml}
+              </tbody>
+            </table>
+          ` : ''}
+
+          <!-- Portal CTA -->
+          <div style="text-align: center; margin-top: 24px;">
+            <a href="http://localhost:5173/vendor" style="display: inline-block; background: #0f172a; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 12px 28px; border-radius: 8px;">
+              Open Vendor Dashboard
+            </a>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 16px 28px; background: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #64748b;">
+          <p style="margin: 0;">Automated End of Day Merchant Digest • Sent daily to registered vendors</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Inventory Daily Digest" <${EMAIL_USER}>`,
+      to: vendor.email,
+      subject: `Daily Merchant Summary - ${displayDate}: ${totalOrders} Order(s), ₹${grossSales.toLocaleString('en-IN')}`,
+      html,
+    });
+    console.log(`[EmailService] Daily merchant digest sent to vendor ${vendor.email}`);
+  } catch (err) {
+    console.error(`[EmailService] Error sending daily vendor digest:`, err.message);
+  }
+}
+
 module.exports = {
   sendOrderPlacedCustomerEmail,
   sendOrderPlacedVendorEmail,
@@ -777,6 +923,7 @@ module.exports = {
   sendMonthlyCustomerStatementEmail,
   sendSixMonthReviewEmail,
   sendAnnualReviewEmail,
+  sendDailyVendorDigestEmail,
 };
 
 

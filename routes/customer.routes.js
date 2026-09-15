@@ -16,7 +16,8 @@ router.post('/login', async (req, res) => {
     const result = await service.login(req.body);
     res.send(result);
   } catch (err) {
-    res.status(401).send({ msg: err.message || 'Login failed' });
+    const status = err.statusCode || 401;
+    res.status(status).send({ msg: err.message || 'Login failed', accountBlocked: Boolean(err.accountBlocked) });
   }
 });
 
@@ -46,6 +47,17 @@ router.get('/wallet', customerAuth, async (req, res) => {
 });
 router.post('/wallet/top-up', customerAuth, async (req, res) => {
   try { await service.topUpWallet(req, res); } catch (err) { res.status(400).json({ msg: err.message || 'Failed to top up wallet' }); }
+});
+
+const StoreSettings = require('../models/store-settings.model');
+router.get('/store-settings', async (req, res) => {
+  try {
+    let settings = await StoreSettings.findOne();
+    if (!settings) settings = await StoreSettings.create({});
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to load store settings' });
+  }
 });
 
 module.exports = router;

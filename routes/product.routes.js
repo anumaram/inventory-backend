@@ -41,6 +41,54 @@ router.get('/search-meta', async (req, res) => {
   }
 });
 
+const Banner = require('../models/banner.model');
+const Promotion = require('../models/promotion.model');
+const Coupon = require('../models/coupon.model');
+
+router.get('/public-banners', async (req, res) => {
+  try {
+    const banners = await Banner.find({ isActive: true, isDeleted: { $ne: true } })
+      .sort({ priority: 1, createdAt: -1 })
+      .lean();
+    res.json(banners);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to load banners' });
+  }
+});
+
+router.get('/public-promotions', async (req, res) => {
+  try {
+    const now = new Date();
+    const promotions = await Promotion.find({
+      isActive: true,
+      isDeleted: { $ne: true },
+      $or: [{ endDate: { $gte: now } }, { endDate: null }]
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json(promotions);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to load promotions' });
+  }
+});
+
+router.get('/public-coupons', async (req, res) => {
+  try {
+    const now = new Date();
+    const coupons = await Coupon.find({
+      isActive: true,
+      isDeleted: { $ne: true },
+      $or: [{ expiryDate: { $gte: now } }, { expiryDate: null }]
+    })
+      .select('code title description discountType discountValue minOrderAmount maxDiscountAmount expiryDate')
+      .sort({ minOrderAmount: 1, createdAt: -1 })
+      .lean();
+    res.json(coupons);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to load coupons' });
+  }
+});
+
 router.get('/:id/reviews', async (req, res) => {
   try {
     await getProductReviews(req, res);

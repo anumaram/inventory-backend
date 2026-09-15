@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Address = require('../models/address.model');
+const Customer = require('../models/customer.model');
 
 const requiredFields = ['fullName', 'phone', 'addressLine1', 'city', 'state', 'pincode', 'type'];
 const editableFields = [...requiredFields, 'addressLine2'];
@@ -40,6 +41,15 @@ exports.createAddress = async (req, res) => {
       return result;
     }, {})
   });
+
+  // Sync phone to customer profile if customer does not have a phone set
+  if (address.phone) {
+    await Customer.updateOne(
+      { _id: req.customerId, $or: [{ phone: { $exists: false } }, { phone: '' }, { phone: null }] },
+      { $set: { phone: address.phone.trim() } }
+    ).catch(() => {});
+  }
+
   res.status(201).json(address);
 };
 

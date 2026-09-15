@@ -62,6 +62,10 @@ app.use('/admin/api', require('./routes/admin.routes'));
 app.use('/transactions', require('./routes/transaction.routes'));
 app.use('/vendor/transactions', require('./routes/vendor-transaction.routes'));
 
+// Static assets (banners, icons, public assets)
+const publicAssetsPath = path.join(__dirname, '..', 'inventory-react-app', 'public');
+app.use(express.static(publicAssetsPath));
+
 const adminFrontendPath = path.join(__dirname, '..', 'admin-frontend');
 app.use('/admin', express.static(adminFrontendPath));
 app.get('/admin', (req, res) => {

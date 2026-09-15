@@ -48,6 +48,13 @@ exports.login = async ({ email, password }) => {
     throw new Error('Invalid credentials');
   }
 
+  if (customer.isBlocked) {
+    const blockedError = new Error('Your account has been blocked by the administrator. Please contact support.');
+    blockedError.statusCode = 403;
+    blockedError.accountBlocked = true;
+    throw blockedError;
+  }
+
   const token = jwt.sign({ id: customer._id, type: 'customer' }, JWT_SECRET);
   return { token };
 };

@@ -3,6 +3,7 @@ const Order = require('../models/order.model');
 const Product = require('../models/product.model');
 const Customer = require('../models/customer.model');
 const User = require('../models/user.model');
+const StoreSettings = require('../models/store-settings.model');
 const { generateOrderId } = require('../utils/orderId.util');
 const { generateInvoiceId } = require('../utils/invoiceId.util');
 const emailService = require('./email.service');
@@ -755,6 +756,22 @@ exports.requestReturn = async (req, res) => {
   const currentStatus = String(order.status || '').toLowerCase();
   if (currentStatus !== 'delivered') {
     return res.status(400).json({ msg: 'Returns can only be requested for delivered orders' });
+  }
+
+  // Check return window from live StoreSettings or vendor policy
+  let settings = null;
+  try {
+    settings = await StoreSettings.findOne();
+  } catch {}
+  const windowDays = Number(settings?.returnWindowDays || 7);
+  const deliveredTime = order.statusTimestamps?.delivered || order.deliveredAt || order.updatedAt;
+  if (deliveredTime) {
+    const elapsedDays = (Date.now() - new Date(deliveredTime).getTime()) / (1000 * 60 * 60 * 24);
+    if (elapsedDays > windowDays) {
+      return res.status(400).json({
+        msg: `Return window expired. Returns are only allowed within ${windowDays} days of delivery.`
+      });
+    }
   }
 
   if (order.returnStatus && order.returnStatus !== 'none') {

@@ -33,6 +33,7 @@ const customerSchema = new mongoose.Schema(
       purpose: { type: String, default: '' },
       expiresAt: { type: Date, default: null }
     },
+    isBlocked: { type: Boolean, default: false },
     isDeleted: { type: Boolean, default: false }
   },
   { timestamps: true }
