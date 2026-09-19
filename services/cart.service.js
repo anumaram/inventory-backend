@@ -33,6 +33,7 @@ const mapCartItem = (item) => {
     discountPercentage: discount,
     quantity: item.productId?.quantity ?? item.quantity ?? 0,
     vendorName: item.productId?.userId?.name || item.vendorName || 'Unknown',
+    savedForLater: Boolean(item.savedForLater),
     qty: item.qty || 1
   };
 };
@@ -76,12 +77,35 @@ exports.getCart = async (req, res) => {
         discountPercentage: { $ifNull: ['$product.discountPercentage', 10] },
         quantity: { $ifNull: ['$product.quantity', 0] },
         vendorName: { $ifNull: ['$vendor.name', 'Unknown'] },
+        savedForLater: { $ifNull: ['$savedForLater', false] },
         qty: { $ifNull: ['$qty', 1] }
       }
     }
   ]);
 
   res.json(items.map(mapCartItem));
+};
+
+exports.saveForLater = async (req, res) => {
+  const { id } = req.params;
+  const item = await Cart.findOneAndUpdate(
+    { _id: toObjectId(id), customerId: toObjectId(req.customerId), isDeleted: { $ne: true } },
+    { savedForLater: true },
+    { new: true }
+  );
+  if (!item) return res.status(404).json({ msg: 'Cart item not found' });
+  res.json({ msg: 'Item saved for later', item });
+};
+
+exports.moveToCart = async (req, res) => {
+  const { id } = req.params;
+  const item = await Cart.findOneAndUpdate(
+    { _id: toObjectId(id), customerId: toObjectId(req.customerId), isDeleted: { $ne: true } },
+    { savedForLater: false },
+    { new: true }
+  );
+  if (!item) return res.status(404).json({ msg: 'Item moved back to cart', item });
+  res.json({ msg: 'Item moved back to cart', item });
 };
 
 exports.addToCart = async (req, res) => {
@@ -432,6 +456,15 @@ exports.checkoutCart = async (req, res) => {
     });
 
     createdOrders.push(order);
+
+    // Increment salesCount for all purchased items
+    for (const it of group.items) {
+      if (it.productId) {
+        Product.findByIdAndUpdate(it.productId, { $inc: { salesCount: Number(it.qty || 1) } }).catch((err) => {
+          console.warn('Could not increment salesCount for product:', it.productId, err.message);
+        });
+      }
+    }
   }
 
   // Clear all checked out items from cart
@@ -580,7 +613,8 @@ exports.checkoutCart = async (req, res) => {
           message: `Your order #${oId} with ${orderObj.items?.length || 1} item(s) worth ₹${Number(orderObj.totalAmount || 0).toLocaleString('en-IN')} has been placed.`,
           type: 'order_placed',
           orderId: oId,
-          actionUrl: '/customer/orders'
+          actionLabel: 'Track Order',
+          actionUrl: `/customer/orders/${oId}/track`
         }).catch(e => console.error('[CartService] Customer notif error:', e.message));
 
         if (customer) {

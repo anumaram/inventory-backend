@@ -31,6 +31,7 @@ router.patch('/vendors/:id/status', adminAuth, ext.updateVendorStatus);
 
 // 5. Products & Categories
 router.get('/products', adminAuth, adminService.getProducts);
+router.get('/products/:id', adminAuth, adminService.getProductById);
 router.patch('/products/:id', adminAuth, adminService.updateProduct);
 router.delete('/products/:id', adminAuth, adminService.deleteProduct);
 
@@ -50,6 +51,7 @@ router.get('/warehouses', adminAuth, ext.getWarehouses);
 router.post('/warehouses', adminAuth, ext.createWarehouse);
 router.get('/transfers', adminAuth, ext.getTransfers);
 router.post('/transfers', adminAuth, ext.createTransfer);
+router.patch('/transfers/:id/status', adminAuth, ext.updateTransferStatus);
 
 // 8. Returns & Refunds
 router.get('/returns', adminAuth, ext.getReturnsList);

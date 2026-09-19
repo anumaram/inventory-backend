@@ -36,10 +36,18 @@ async function recordJobRun(jobAction, periodKey, details) {
   }
 }
 
+// Helper to execute batch tasks in parallel chunks of specified size
+async function sendInBatches(items, batchSize, workerFn) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    await Promise.allSettled(chunk.map(workerFn));
+  }
+}
+
 /**
  * 1. Dispatch Monthly Emails (Customers, Vendors, Admin)
  */
-async function dispatchMonthlyEmails(force = false) {
+async function dispatchMonthlyEmails(force = false, options = {}) {
   const now = new Date();
   const periodKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const monthLabel = now.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
@@ -54,83 +62,98 @@ async function dispatchMonthlyEmails(force = false) {
   let vendorCount = 0;
   let customerCount = 0;
 
-  // 1A. Dispatch to Vendors
-  try {
-    const vendors = await User.find({ isDeleted: { $ne: true } });
-    for (const v of vendors) {
-      const txns = await VendorTransaction.find({ vendorId: v._id }).sort({ createdAt: -1 }).limit(10);
-      const totalEarnings = txns.filter(t => t.type === 'order_earning').reduce((s, t) => s + (t.amount || 0), 0);
-      const totalCommission = txns.reduce((s, t) => s + (t.commission || 0), 0);
-      const totalPayout = txns.filter(t => t.type === 'payout').reduce((s, t) => s + (t.amount || 0), 0);
+  // 1A. Dispatch to Admin FIRST (unless skipAdmin option is specified)
+  if (!options.skipAdmin) {
+    try {
+      const admin = options.targetAdmin || await Admin.findOne({ isDeleted: { $ne: true } });
+      if (admin) {
+        const [orderAgg, vCount, cCount] = await Promise.all([
+          Order.aggregate([
+            { $match: { isDeleted: { $ne: true } } },
+            { $group: { _id: null, totalOrders: { $sum: 1 }, grossVolume: { $sum: '$totalAmount' }, totalRefunds: { $sum: '$refundAmount' } } }
+          ]),
+          User.countDocuments({ isDeleted: { $ne: true } }),
+          Customer.countDocuments({ isDeleted: { $ne: true } })
+        ]);
 
-      await emailService.sendMonthlyVendorPayoutEmail({
-        vendor: v,
-        transactions: txns,
-        totalPayout,
-        totalEarnings,
-        totalCommission,
-        month: monthLabel
-      });
-      vendorCount++;
+        const stats = orderAgg[0] || { totalOrders: 0, grossVolume: 0, totalRefunds: 0 };
+        const commissionEarned = stats.grossVolume * 0.05;
+
+        await emailService.sendMonthlyAdminRevenueEmail({
+          admin,
+          metrics: {
+            grossVolume: stats.grossVolume,
+            commissionEarned,
+            netRevenue: commissionEarned,
+            totalOrders: stats.totalOrders,
+            totalRefunds: stats.totalRefunds,
+            activeVendors: vCount,
+            activeCustomers: cCount
+          },
+          month: monthLabel
+        });
+        console.log(`[EmailCron] Admin monthly digest delivered to ${admin.email}`);
+      }
+    } catch (err) {
+      console.error('[EmailCron] Error sending admin monthly email:', err.message);
     }
-  } catch (err) {
-    console.error('[EmailCron] Error sending vendor monthly emails:', err.message);
   }
 
-  // 1B. Dispatch to Customers
-  try {
-    const customers = await Customer.find({ isDeleted: { $ne: true } });
-    const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  // 1B. Dispatch to Vendors in parallel chunks of 5
+  if (!options.onlyCustomers) {
+    try {
+      const vendors = await User.find({ isDeleted: { $ne: true } });
+      await sendInBatches(vendors, 5, async (v) => {
+        try {
+          const txns = await VendorTransaction.find({ vendorId: v._id }).sort({ createdAt: -1 }).limit(10);
+          const totalEarnings = txns.filter(t => t.type === 'order_earning').reduce((s, t) => s + (t.amount || 0), 0);
+          const totalCommission = txns.reduce((s, t) => s + (t.commission || 0), 0);
+          const totalPayout = txns.filter(t => t.type === 'payout').reduce((s, t) => s + (t.amount || 0), 0);
 
-    for (const c of customers) {
-      const customerOrders = await Order.find({ customerId: c._id, isDeleted: { $ne: true }, createdAt: { $gte: oneMonthAgo } }).sort({ createdAt: -1 });
-      const totalSpent = customerOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-
-      await emailService.sendMonthlyCustomerStatementEmail({
-        customer: c,
-        orders: customerOrders,
-        totalSpent,
-        walletBalance: c.wallet?.balance || 0,
-        month: monthLabel
+          await emailService.sendMonthlyVendorPayoutEmail({
+            vendor: v,
+            transactions: txns,
+            totalPayout,
+            totalEarnings,
+            totalCommission,
+            month: monthLabel
+          });
+          vendorCount++;
+        } catch (vErr) {
+          console.error(`[EmailCron] Failed vendor ${v.email}:`, vErr.message);
+        }
       });
-      customerCount++;
+    } catch (err) {
+      console.error('[EmailCron] Error sending vendor monthly emails:', err.message);
     }
-  } catch (err) {
-    console.error('[EmailCron] Error sending customer monthly emails:', err.message);
   }
 
-  // 1C. Dispatch to Admin
-  try {
-    const admin = await Admin.findOne({ isDeleted: { $ne: true } });
-    if (admin) {
-      const [orderAgg, vCount, cCount] = await Promise.all([
-        Order.aggregate([
-          { $match: { isDeleted: { $ne: true } } },
-          { $group: { _id: null, totalOrders: { $sum: 1 }, grossVolume: { $sum: '$totalAmount' }, totalRefunds: { $sum: '$refundAmount' } } }
-        ]),
-        User.countDocuments({ isDeleted: { $ne: true } }),
-        Customer.countDocuments({ isDeleted: { $ne: true } })
-      ]);
+  // 1C. Dispatch to Customers in parallel chunks of 5
+  if (!options.onlyVendors) {
+    try {
+      const customers = await Customer.find({ isDeleted: { $ne: true } });
+      const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-      const stats = orderAgg[0] || { totalOrders: 0, grossVolume: 0, totalRefunds: 0 };
-      const commissionEarned = stats.grossVolume * 0.05;
+      await sendInBatches(customers, 5, async (c) => {
+        try {
+          const customerOrders = await Order.find({ customerId: c._id, isDeleted: { $ne: true }, createdAt: { $gte: oneMonthAgo } }).sort({ createdAt: -1 });
+          const totalSpent = customerOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
 
-      await emailService.sendMonthlyAdminRevenueEmail({
-        admin,
-        metrics: {
-          grossVolume: stats.grossVolume,
-          commissionEarned,
-          netRevenue: commissionEarned,
-          totalOrders: stats.totalOrders,
-          totalRefunds: stats.totalRefunds,
-          activeVendors: vCount,
-          activeCustomers: cCount
-        },
-        month: monthLabel
+          await emailService.sendMonthlyCustomerStatementEmail({
+            customer: c,
+            orders: customerOrders,
+            totalSpent,
+            walletBalance: c.wallet?.balance || 0,
+            month: monthLabel
+          });
+          customerCount++;
+        } catch (cErr) {
+          console.error(`[EmailCron] Failed customer ${c.email}:`, cErr.message);
+        }
       });
+    } catch (err) {
+      console.error('[EmailCron] Error sending customer monthly emails:', err.message);
     }
-  } catch (err) {
-    console.error('[EmailCron] Error sending admin monthly email:', err.message);
   }
 
   await recordJobRun('CRON_MONTHLY_EMAILS', periodKey, `Dispatched monthly statements to ${customerCount} customers, ${vendorCount} vendors, and admin for ${periodKey}`);
@@ -140,7 +163,7 @@ async function dispatchMonthlyEmails(force = false) {
 /**
  * 2. Dispatch 6-Month Review Emails
  */
-async function dispatchSixMonthEmails(force = false) {
+async function dispatchSixMonthEmails(force = false, options = {}) {
   const now = new Date();
   const halfYear = now.getMonth() < 6 ? 'H1' : 'H2';
   const periodKey = `${now.getFullYear()}-${halfYear}`;
@@ -152,43 +175,65 @@ async function dispatchSixMonthEmails(force = false) {
 
   console.log(`[EmailCron] Starting 6-Month Review Dispatch for ${periodKey}...`);
 
-  // Customers
-  const customers = await Customer.find({ isDeleted: { $ne: true } });
-  for (const c of customers) {
-    const orders = await Order.find({ customerId: c._id, isDeleted: { $ne: true } });
-    const totalSpent = orders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendSixMonthReviewEmail({
-      recipient: c,
-      userType: 'customer',
-      metrics: { totalSpent, ordersCount: orders.length },
-      period: `${halfYear} ${now.getFullYear()}`
-    });
+  // Admin FIRST
+  if (!options.skipAdmin) {
+    try {
+      const admin = options.targetAdmin || await Admin.findOne({ isDeleted: { $ne: true } });
+      if (admin) {
+        const allOrders = await Order.find({ isDeleted: { $ne: true } });
+        const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendSixMonthReviewEmail({
+          recipient: admin,
+          userType: 'admin',
+          metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
+          period: `${halfYear} ${now.getFullYear()}`
+        });
+      }
+    } catch (err) {
+      console.error('[EmailCron] Error sending admin 6-month review:', err.message);
+    }
   }
 
-  // Vendors
-  const vendors = await User.find({ isDeleted: { $ne: true } });
-  for (const v of vendors) {
-    const vOrders = await Order.find({ vendorId: v._id, isDeleted: { $ne: true } });
-    const volume = vOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendSixMonthReviewEmail({
-      recipient: v,
-      userType: 'vendor',
-      metrics: { volume, netProfit: volume * 0.95, ordersCount: vOrders.length },
-      period: `${halfYear} ${now.getFullYear()}`
+  // Customers in batches of 5
+  try {
+    const customers = await Customer.find({ isDeleted: { $ne: true } });
+    await sendInBatches(customers, 5, async (c) => {
+      try {
+        const orders = await Order.find({ customerId: c._id, isDeleted: { $ne: true } });
+        const totalSpent = orders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendSixMonthReviewEmail({
+          recipient: c,
+          userType: 'customer',
+          metrics: { totalSpent, ordersCount: orders.length },
+          period: `${halfYear} ${now.getFullYear()}`
+        });
+      } catch (cErr) {
+        console.error(`[EmailCron] 6-Month error customer ${c.email}:`, cErr.message);
+      }
     });
+  } catch (err) {
+    console.error('[EmailCron] Error sending customer 6-month reviews:', err.message);
   }
 
-  // Admin
-  const admin = await Admin.findOne({ isDeleted: { $ne: true } });
-  if (admin) {
-    const allOrders = await Order.find({ isDeleted: { $ne: true } });
-    const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendSixMonthReviewEmail({
-      recipient: admin,
-      userType: 'admin',
-      metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
-      period: `${halfYear} ${now.getFullYear()}`
+  // Vendors in batches of 5
+  try {
+    const vendors = await User.find({ isDeleted: { $ne: true } });
+    await sendInBatches(vendors, 5, async (v) => {
+      try {
+        const vOrders = await Order.find({ vendorId: v._id, isDeleted: { $ne: true } });
+        const volume = vOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendSixMonthReviewEmail({
+          recipient: v,
+          userType: 'vendor',
+          metrics: { volume, netProfit: volume * 0.95, ordersCount: vOrders.length },
+          period: `${halfYear} ${now.getFullYear()}`
+        });
+      } catch (vErr) {
+        console.error(`[EmailCron] 6-Month error vendor ${v.email}:`, vErr.message);
+      }
     });
+  } catch (err) {
+    console.error('[EmailCron] Error sending vendor 6-month reviews:', err.message);
   }
 
   await recordJobRun('CRON_SIX_MONTH_EMAILS', periodKey, `Dispatched 6-Month review statements for ${periodKey}`);
@@ -198,7 +243,7 @@ async function dispatchSixMonthEmails(force = false) {
 /**
  * 3. Dispatch 1-Year Annual Emails
  */
-async function dispatchAnnualEmails(force = false) {
+async function dispatchAnnualEmails(force = false, options = {}) {
   const now = new Date();
   const periodKey = `${now.getFullYear()}`;
 
@@ -209,43 +254,65 @@ async function dispatchAnnualEmails(force = false) {
 
   console.log(`[EmailCron] Starting Annual Milestone Dispatch for ${periodKey}...`);
 
-  // Customers
-  const customers = await Customer.find({ isDeleted: { $ne: true } });
-  for (const c of customers) {
-    const orders = await Order.find({ customerId: c._id, isDeleted: { $ne: true } });
-    const totalSpent = orders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendAnnualReviewEmail({
-      recipient: c,
-      userType: 'customer',
-      metrics: { totalSpent, ordersCount: orders.length, savings: totalSpent * 0.15 },
-      year: periodKey
-    });
+  // Admin FIRST
+  if (!options.skipAdmin) {
+    try {
+      const admin = options.targetAdmin || await Admin.findOne({ isDeleted: { $ne: true } });
+      if (admin) {
+        const allOrders = await Order.find({ isDeleted: { $ne: true } });
+        const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendAnnualReviewEmail({
+          recipient: admin,
+          userType: 'admin',
+          metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
+          year: periodKey
+        });
+      }
+    } catch (err) {
+      console.error('[EmailCron] Error sending admin annual review:', err.message);
+    }
   }
 
-  // Vendors
-  const vendors = await User.find({ isDeleted: { $ne: true } });
-  for (const v of vendors) {
-    const vOrders = await Order.find({ vendorId: v._id, isDeleted: { $ne: true } });
-    const volume = vOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendAnnualReviewEmail({
-      recipient: v,
-      userType: 'vendor',
-      metrics: { volume, netProfit: volume * 0.95, ordersCount: vOrders.length },
-      year: periodKey
+  // Customers in batches of 5
+  try {
+    const customers = await Customer.find({ isDeleted: { $ne: true } });
+    await sendInBatches(customers, 5, async (c) => {
+      try {
+        const orders = await Order.find({ customerId: c._id, isDeleted: { $ne: true } });
+        const totalSpent = orders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendAnnualReviewEmail({
+          recipient: c,
+          userType: 'customer',
+          metrics: { totalSpent, ordersCount: orders.length, savings: totalSpent * 0.15 },
+          year: periodKey
+        });
+      } catch (cErr) {
+        console.error(`[EmailCron] Annual error customer ${c.email}:`, cErr.message);
+      }
     });
+  } catch (err) {
+    console.error('[EmailCron] Error sending customer annual reviews:', err.message);
   }
 
-  // Admin
-  const admin = await Admin.findOne({ isDeleted: { $ne: true } });
-  if (admin) {
-    const allOrders = await Order.find({ isDeleted: { $ne: true } });
-    const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
-    await emailService.sendAnnualReviewEmail({
-      recipient: admin,
-      userType: 'admin',
-      metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
-      year: periodKey
+  // Vendors in batches of 5
+  try {
+    const vendors = await User.find({ isDeleted: { $ne: true } });
+    await sendInBatches(vendors, 5, async (v) => {
+      try {
+        const vOrders = await Order.find({ vendorId: v._id, isDeleted: { $ne: true } });
+        const volume = vOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+        await emailService.sendAnnualReviewEmail({
+          recipient: v,
+          userType: 'vendor',
+          metrics: { volume, netProfit: volume * 0.95, ordersCount: vOrders.length },
+          year: periodKey
+        });
+      } catch (vErr) {
+        console.error(`[EmailCron] Annual error vendor ${v.email}:`, vErr.message);
+      }
     });
+  } catch (err) {
+    console.error('[EmailCron] Error sending vendor annual reviews:', err.message);
   }
 
   await recordJobRun('CRON_ANNUAL_EMAILS', periodKey, `Dispatched Annual Year-in-Review digests for ${periodKey}`);
@@ -273,36 +340,37 @@ async function dispatchDailyVendorDigests(force = false) {
     const Return = require('../models/return.model');
     const vendors = await User.find({ isDeleted: { $ne: true } });
 
-    for (const v of vendors) {
-      // Find orders placed today for this vendor
-      const orders = await Order.find({
-        vendorId: v._id,
-        isDeleted: { $ne: true },
-        createdAt: { $gte: startOfDay, $lte: endOfDay }
-      }).lean();
+    await sendInBatches(vendors, 5, async (v) => {
+      try {
+        const orders = await Order.find({
+          vendorId: v._id,
+          isDeleted: { $ne: true },
+          createdAt: { $gte: startOfDay, $lte: endOfDay }
+        }).lean();
 
-      // Find transactions today for this vendor
-      const txns = await VendorTransaction.find({
-        vendorId: v._id,
-        createdAt: { $gte: startOfDay, $lte: endOfDay }
-      }).lean();
+        const txns = await VendorTransaction.find({
+          vendorId: v._id,
+          createdAt: { $gte: startOfDay, $lte: endOfDay }
+        }).lean();
 
-      // Find returns updated/requested today for this vendor
-      const returns = await Return.find({
-        vendorId: v._id,
-        isDeleted: { $ne: true },
-        createdAt: { $gte: startOfDay, $lte: endOfDay }
-      }).lean();
+        const returns = await Return.find({
+          vendorId: v._id,
+          isDeleted: { $ne: true },
+          createdAt: { $gte: startOfDay, $lte: endOfDay }
+        }).lean();
 
-      await emailService.sendDailyVendorDigestEmail({
-        vendor: v,
-        orders,
-        transactions: txns,
-        returns,
-        dateStr: now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })
-      });
-      dispatched++;
-    }
+        await emailService.sendDailyVendorDigestEmail({
+          vendor: v,
+          orders,
+          transactions: txns,
+          returns,
+          dateStr: now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })
+        });
+        dispatched++;
+      } catch (vErr) {
+        console.error(`[EmailCron] Daily digest error vendor ${v.email}:`, vErr.message);
+      }
+    });
 
     await recordJobRun('CRON_DAILY_VENDOR_DIGEST', dateKey, `Dispatched daily digest to ${dispatched} active vendor(s)`);
     console.log(`[EmailCron] Finished daily vendor digest for ${dispatched} vendors.`);

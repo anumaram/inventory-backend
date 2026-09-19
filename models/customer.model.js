@@ -8,6 +8,7 @@ const customerSchema = new mongoose.Schema(
     phone: { type: String, default: '' },
     gender: { type: String, default: '' },
     dateOfBirth: { type: String, default: '' },
+    avatar: { type: String, default: '' },
     paymentMethods: [
       {
         type: { type: String, enum: ['upi', 'card', 'netbanking', 'wallet'] },

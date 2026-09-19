@@ -6,7 +6,9 @@ const {
   addToCart,
   updateCartItem,
   removeCartItem,
-  checkoutCart
+  checkoutCart,
+  saveForLater,
+  moveToCart
 } = require('../services/cart.service');
 
 router.get('/', customerAuth, async (req, res) => {
@@ -14,6 +16,22 @@ router.get('/', customerAuth, async (req, res) => {
     await getCart(req, res);
   } catch (err) {
     res.status(500).json({ msg: err.message || 'Failed to load cart' });
+  }
+});
+
+router.patch('/:id/save-for-later', customerAuth, async (req, res) => {
+  try {
+    await saveForLater(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to save item for later' });
+  }
+});
+
+router.patch('/:id/move-to-cart', customerAuth, async (req, res) => {
+  try {
+    await moveToCart(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to move item to cart' });
   }
 });
 

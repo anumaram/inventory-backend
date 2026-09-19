@@ -314,6 +314,7 @@ exports.getAllProducts = async (req, res) => {
             else: 4.3
           }
         },
+        salesCount: { $ifNull: ['$salesCount', 0] },
         ratingCount: {
           $cond: {
             if: { $and: [{ $ne: ['$ratingCount', null] }, { $gt: ['$ratingCount', 0] }] },
@@ -403,6 +404,12 @@ exports.getAllProducts = async (req, res) => {
     sortStage = { $sort: { name: 1, _id: -1 } };
   } else if (sortBy === 'newest') {
     sortStage = { $sort: { createdAt: -1, _id: -1 } };
+  } else if (sortBy === 'trending') {
+    sortStage = { $sort: { salesCount: -1, rating: -1, ratingCount: -1, _id: -1 } };
+  } else if (sortBy === 'best_sellers') {
+    sortStage = { $sort: { salesCount: -1, ratingCount: -1, _id: -1 } };
+  } else if (sortBy === 'discount_desc') {
+    sortStage = { $sort: { discountPercentage: -1, rating: -1, _id: -1 } };
   }
 
   const totalAgg = await Product.aggregate([
@@ -444,6 +451,7 @@ exports.getAllProducts = async (req, res) => {
         warranty: 1,
         rating: 1,
         ratingCount: 1,
+        salesCount: 1,
         createdAt: 1
       }
     },
@@ -683,7 +691,7 @@ exports.getProductReviews = async (req, res) => {
 
 exports.addProductReview = async (req, res) => {
   const { id } = req.params;
-  const { rating, title, comment } = req.body || {};
+  const { rating, title, comment, images } = req.body || {};
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ msg: 'Invalid product ID' });
@@ -711,6 +719,7 @@ exports.addProductReview = async (req, res) => {
     rating: numRating,
     title: title?.trim() || '',
     comment: comment.trim(),
+    images: Array.isArray(images) ? images.filter(Boolean) : [],
     isVerifiedPurchase: true
   });
 
@@ -727,6 +736,94 @@ exports.addProductReview = async (req, res) => {
   res.status(201).json({
     msg: 'Review submitted successfully',
     review,
+    productRating: newAvg,
+    productRatingCount: newTotal
+  });
+};
+
+exports.updateProductReview = async (req, res) => {
+  const { id, reviewId } = req.params;
+  const { rating, title, comment, images } = req.body || {};
+
+  if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(reviewId)) {
+    return res.status(400).json({ msg: 'Invalid product or review ID' });
+  }
+  const numRating = Number(rating);
+  if (!numRating || numRating < 1 || numRating > 5) {
+    return res.status(400).json({ msg: 'Rating must be a number between 1 and 5' });
+  }
+  if (!comment?.trim()) {
+    return res.status(400).json({ msg: 'Review comment is required' });
+  }
+
+  const review = await Review.findOne({ _id: toObjectId(reviewId), productId: toObjectId(id) });
+  if (!review) {
+    return res.status(404).json({ msg: 'Review not found' });
+  }
+
+  const custId = req.customerId || req.userId;
+  // Authorization check: customerId matches, or legacy name matches
+  if (custId && review.customerId && String(review.customerId) !== String(custId)) {
+    return res.status(403).json({ msg: 'You are not authorized to edit this review' });
+  }
+
+  review.rating = numRating;
+  if (title !== undefined) review.title = title.trim();
+  review.comment = comment.trim();
+  if (Array.isArray(images)) {
+    review.images = images.filter(Boolean);
+  }
+  await review.save();
+
+  // Recalculate average rating & count for Product
+  const allReviews = await Review.find({ productId: toObjectId(id), status: { $ne: 'rejected' } });
+  const newTotal = allReviews.length;
+  const newAvg = newTotal > 0 ? Number((allReviews.reduce((acc, r) => acc + r.rating, 0) / newTotal).toFixed(1)) : 0;
+
+  await Product.findByIdAndUpdate(id, {
+    rating: newAvg,
+    ratingCount: newTotal
+  });
+
+  res.json({
+    msg: 'Review updated successfully',
+    review,
+    productRating: newAvg,
+    productRatingCount: newTotal
+  });
+};
+
+exports.deleteProductReview = async (req, res) => {
+  const { id, reviewId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(reviewId)) {
+    return res.status(400).json({ msg: 'Invalid product or review ID' });
+  }
+
+  const review = await Review.findOne({ _id: toObjectId(reviewId), productId: toObjectId(id) });
+  if (!review) {
+    return res.status(404).json({ msg: 'Review not found' });
+  }
+
+  const custId = req.customerId || req.userId;
+  if (custId && review.customerId && String(review.customerId) !== String(custId) && !req.isAdmin) {
+    return res.status(403).json({ msg: 'You are not authorized to delete this review' });
+  }
+
+  await Review.deleteOne({ _id: toObjectId(reviewId) });
+
+  // Recalculate average rating & count for Product
+  const allReviews = await Review.find({ productId: toObjectId(id), status: { $ne: 'rejected' } });
+  const newTotal = allReviews.length;
+  const newAvg = newTotal > 0 ? Number((allReviews.reduce((acc, r) => acc + r.rating, 0) / newTotal).toFixed(1)) : 0;
+
+  await Product.findByIdAndUpdate(id, {
+    rating: newAvg,
+    ratingCount: newTotal
+  });
+
+  res.json({
+    msg: 'Review deleted successfully',
     productRating: newAvg,
     productRatingCount: newTotal
   });
@@ -872,6 +969,23 @@ exports.updateProduct = async (req, res) => {
     });
   }
 
+  // Dispatch back-in-stock and price-drop alerts to wishlisted customers
+  try {
+    const wishlistService = require('./wishlist.service');
+    wishlistService.checkAndNotifyWishlistAlerts({
+      productId: product._id,
+      productName: product.name,
+      oldStock,
+      newStock,
+      oldPrice,
+      newPrice,
+      oldDiscount: existing.discountPercentage,
+      newDiscount: product.discountPercentage
+    }).catch((e) => console.error('[WishlistAlerts] Error in updateProduct:', e.message));
+  } catch (err) {
+    // Non-blocking
+  }
+
   res.json(product);
 };
 
@@ -919,6 +1033,23 @@ exports.adjustProductStock = async (req, res) => {
       reason: reason?.trim() || (qtyChange > 0 ? `Vendor added stock (+${qtyChange})` : `Vendor reduced stock (${qtyChange})`),
       actor: 'Vendor'
     });
+
+    // Dispatch back-in-stock alert if product was out of stock
+    try {
+      const wishlistService = require('./wishlist.service');
+      wishlistService.checkAndNotifyWishlistAlerts({
+        productId: product._id,
+        productName: product.name,
+        oldStock,
+        newStock: targetStock,
+        oldPrice: product.price,
+        newPrice: product.price,
+        oldDiscount: product.discountPercentage,
+        newDiscount: product.discountPercentage
+      }).catch((e) => console.error('[WishlistAlerts] Error in adjustProductStock:', e.message));
+    } catch (err) {
+      // Non-blocking
+    }
 
     res.json({
       msg: 'Stock adjusted successfully',
@@ -991,5 +1122,134 @@ exports.getProductHistory = async (req, res) => {
     res.status(500).json({ msg: err.message || 'Failed to load product history' });
   }
 };
+
+exports.compareProductsAi = async (req, res) => {
+  try {
+    const { productIds } = req.body;
+    if (!Array.isArray(productIds) || productIds.length < 2) {
+      return res.status(400).json({ msg: 'Please provide at least 2 product IDs to compare' });
+    }
+
+    const products = await Product.find({ _id: { $in: productIds.map(toObjectId) }, isDeleted: { $ne: true } })
+      .populate('userId', 'name businessName')
+      .lean();
+
+    if (products.length < 2) {
+      return res.status(400).json({ msg: 'Could not find sufficient products to compare' });
+    }
+
+    // Flatten nested specs object into { 'Section > Key': value } map
+    const flattenSpecs = (specs) => {
+      const flat = {};
+      if (!specs || typeof specs !== 'object') return flat;
+      for (const [section, fields] of Object.entries(specs)) {
+        if (fields && typeof fields === 'object') {
+          for (const [key, value] of Object.entries(fields)) {
+            flat[`${section} › ${key}`] = String(value || '').trim();
+          }
+        }
+      }
+      return flat;
+    };
+
+    const summary = products.map((p) => {
+      const orig = Number(p.price || 0);
+      const disc = Number(p.discountPercentage || 10);
+      const eff = Math.round(orig * (1 - disc / 100));
+      const flatSpecs = flattenSpecs(p.specifications);
+      return {
+        _id: p._id,
+        name: p.name,
+        category: p.category,
+        brand: p.brand || '',
+        image: p.image || (Array.isArray(p.images) ? p.images[0] : ''),
+        price: eff,
+        originalPrice: orig,
+        rating: p.rating || 4.3,
+        ratingCount: p.ratingCount || 28,
+        stock: p.quantity,
+        vendor: p.userId?.name || p.vendorName || 'Verified Merchant',
+        warranty: p.warranty || '1 Year Manufacturer Warranty',
+        returnPolicy: p.returnPolicy || '7 Days Return & Exchange',
+        specs: flatSpecs
+      };
+    });
+
+    // Collect all spec keys across all products
+    const allSpecKeys = new Set();
+    summary.forEach((s) => Object.keys(s.specs).forEach((k) => allSpecKeys.add(k)));
+
+    // Find spec advantages: for each product, which specs are better/unique vs others
+    const specAdvantages = {};
+    summary.forEach((prod) => {
+      const advantages = [];
+      allSpecKeys.forEach((key) => {
+        const myVal = prod.specs[key];
+        if (!myVal) return;
+        // Check if this product has a value while others don't (unique spec)
+        const othersHaveIt = summary.filter((s) => s._id !== prod._id && s.specs[key]);
+        if (othersHaveIt.length === 0) {
+          advantages.push(`${key.split(' › ').pop()}: ${myVal} (exclusive)`);
+          return;
+        }
+        // Try numeric comparison: higher is better for RAM/Storage/Battery/Speed/Resolution
+        const higherBetterKeys = /ram|storage|battery|mah|capacity|resolution|speed|core|ghz|mp|gb|tb/i;
+        if (higherBetterKeys.test(key)) {
+          const myNum = parseFloat(myVal);
+          const allBetter = summary.filter((s) => s._id !== prod._id).every((s) => {
+            const otherNum = parseFloat(s.specs[key] || '0');
+            return !isNaN(myNum) && !isNaN(otherNum) && myNum > otherNum;
+          });
+          if (allBetter && !isNaN(myNum)) {
+            advantages.push(`Superior ${key.split(' › ').pop()} (${myVal})`);
+          }
+        }
+      });
+      specAdvantages[String(prod._id)] = advantages.slice(0, 4); // keep top 4 spec advantages
+    });
+
+    // Scoring: rating (x25), stock (+20), lower price (penalized), spec advantages bonus (+5 each)
+    let best = summary[0];
+    let maxScore = -999999;
+    summary.forEach((item) => {
+      const specBonus = (specAdvantages[String(item._id)] || []).length * 5;
+      const score = (item.rating * 25) + (item.stock > 0 ? 20 : -50) - (item.price / 800) + specBonus;
+      if (score > maxScore) {
+        maxScore = score;
+        best = item;
+      }
+    });
+
+    // Build key spec differentiators for verdict text
+    const bestSpecHighlights = (specAdvantages[String(best._id)] || []).slice(0, 2);
+    const specVerdictText = bestSpecHighlights.length > 0
+      ? ` Key spec advantages: ${bestSpecHighlights.join('; ')}.`
+      : '';
+
+    // Build pros combining spec advantages + commercial metrics
+    const pros = [
+      `Best price-to-performance ratio at ₹${best.price.toLocaleString('en-IN')}`,
+      `Top customer rating (${best.rating}★ from ${best.ratingCount}+ reviews)`,
+      `In-stock and fulfilled by ${best.vendor} (${best.stock} units available)`
+    ];
+    (specAdvantages[String(best._id)] || []).slice(0, 2).forEach((adv) => pros.push(adv));
+
+    const recommendation = {
+      winnerId: best._id,
+      winnerName: best.name,
+      badge: 'Best Overall Pick',
+      verdict: `After comparing prices, ratings, stock availability, and ${allSpecKeys.size} technical specification points — **${best.name}** delivers the best overall value. With a ${best.rating}★ rating and effective price of ₹${best.price.toLocaleString('en-IN')}, it leads across all key decision factors.${specVerdictText}`,
+      pros
+    };
+
+    res.json({
+      recommendation,
+      products: summary
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'AI comparison failed' });
+  }
+};
+
 
 

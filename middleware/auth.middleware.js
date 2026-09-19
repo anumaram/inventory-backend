@@ -33,6 +33,7 @@ module.exports = async (req, res, next) => {
 
     req.userId = vendor._id;
     req.vendor = vendor;
+    req.user = vendor;
     next();
   } catch (err) {
     res.status(401).json({ msg: 'Invalid token' });

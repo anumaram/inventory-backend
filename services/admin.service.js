@@ -367,6 +367,20 @@ exports.getProducts = async (req, res) => {
         category: 1,
         quantity: 1,
         price: 1,
+        discountPercentage: { $ifNull: ['$discountPercentage', 10] },
+        image: {
+          $cond: {
+            if: { $and: [{ $ne: ['$image', null] }, { $ne: ['$image', ''] }] },
+            then: '$image',
+            else: { $ifNull: [{ $arrayElemAt: ['$images', 0] }, ''] }
+          }
+        },
+        images: { $ifNull: ['$images', []] },
+        description: { $ifNull: ['$description', ''] },
+        rating: { $ifNull: ['$rating', 4.5] },
+        ratingCount: { $ifNull: ['$ratingCount', 1] },
+        colors: { $ifNull: ['$colors', []] },
+        sizes: { $ifNull: ['$sizes', []] },
         userId: 1,
         vendorName: 1,
         createdAt: 1
@@ -375,6 +389,32 @@ exports.getProducts = async (req, res) => {
   ];
 
   res.json(await getPagedAggregate(Product, pipeline, page, limit));
+};
+
+exports.getProductById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ msg: 'Invalid product ID' });
+    }
+
+    const product = await Product.findOne({ _id: toObjectId(id), isDeleted: { $ne: true } })
+      .populate('userId', 'name email mobile storeName businessName address isVerified')
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({ msg: 'Product not found' });
+    }
+
+    product.vendorName = product.userId?.name || product.userId?.storeName || 'Merchant';
+    product.vendorEmail = product.userId?.email || '';
+    product.vendorMobile = product.userId?.mobile || '';
+    product.vendorAddress = product.userId?.address || '';
+
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to fetch product details' });
+  }
 };
 
 exports.updateProduct = async (req, res) => {

@@ -8,7 +8,8 @@ const {
   getCollections,
   createCollection,
   updateCollection,
-  deleteCollection
+  deleteCollection,
+  updateWishlistAlerts
 } = require('../services/wishlist.service');
 
 router.get('/collections', customerAuth, async (req, res) => {
@@ -64,6 +65,14 @@ router.delete('/:id', customerAuth, async (req, res) => {
     await removeFromWishlist(req, res);
   } catch (err) {
     res.status(500).json({ msg: err.message || 'Failed to remove item' });
+  }
+});
+
+router.patch('/:id/alerts', customerAuth, async (req, res) => {
+  try {
+    await updateWishlistAlerts(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to update alerts' });
   }
 });
 

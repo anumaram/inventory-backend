@@ -331,7 +331,7 @@ exports.updateReturnStatusByVendor = async (req, res) => {
         await order.save();
       }
 
-      // Send customer notification
+      // Send customer notification and email
       try {
         const notificationService = require('./notification.service');
         await notificationService.createNotification({
@@ -342,8 +342,19 @@ exports.updateReturnStatusByVendor = async (req, res) => {
           type: 'refund_credited',
           actionUrl: '/customer/settings'
         });
+
+        if (customer?.email) {
+          const emailService = require('./email.service');
+          await emailService.sendReturnRefundCreditedEmail({
+            order: order || { orderId: returnRecord.orderId, _id: returnRecord.orderRef },
+            customer,
+            refundAmount: finalRefundAmt,
+            refundMethod: 'wallet',
+            returnRecord
+          });
+        }
       } catch (e) {
-        console.error('[ReturnService] Error sending refund notification:', e.message);
+        console.error('[ReturnService] Error sending refund notification/email:', e.message);
       }
     } else if (action === 'reject') {
       newStatus = 'rejected';

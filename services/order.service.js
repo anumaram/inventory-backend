@@ -142,6 +142,8 @@ exports.createOrder = async (req, res) => {
     }
   });
 
+  Product.findByIdAndUpdate(product._id, { $inc: { salesCount: qty } }).catch(() => {});
+
   const normOrder = normalizeOrder(order.toObject ? order.toObject() : order);
 
   // Send real-time emails and create in-app notifications asynchronously
@@ -157,7 +159,8 @@ exports.createOrder = async (req, res) => {
         message: `Your order #${oId} for ${product.name || 'Product'} has been placed.`,
         type: 'order_placed',
         orderId: oId,
-        actionUrl: '/customer/orders'
+        actionLabel: 'Track Order',
+        actionUrl: `/customer/orders/${oId}/track`
       });
 
       if (product.userId) {
@@ -701,7 +704,8 @@ exports.cancelOrder = async (req, res) => {
         message: `Your order #${oId} has been cancelled.${orderTotal > 0 && order.paymentMethod !== 'cod' ? ` ₹${orderTotal.toLocaleString('en-IN')} has been refunded to your wallet.` : ''}`,
         type: 'order_cancelled',
         orderId: oId,
-        actionUrl: '/customer/orders'
+        actionLabel: 'View Order',
+        actionUrl: `/customer/orders/${oId}/track`
       });
 
       if (order.vendorId) {
@@ -834,7 +838,8 @@ exports.requestReturn = async (req, res) => {
         message: `Your return request for order #${oId} has been received. Pickup will be arranged soon.`,
         type: 'order_return_requested',
         orderId: oId,
-        actionUrl: '/customer/orders'
+        actionLabel: 'Track Return',
+        actionUrl: `/customer/orders/${oId}/track`
       });
 
       if (order.vendorId) {
@@ -848,8 +853,17 @@ exports.requestReturn = async (req, res) => {
           actionUrl: '/vendor/orders'
         });
       }
+
+      const customer = await Customer.findById(req.customerId).select('name email');
+      if (customer?.email) {
+        await emailService.sendReturnRequestedCustomerEmail({
+          order: normalizeOrder(order.toObject ? order.toObject() : order),
+          customer,
+          returnRecord: { reason, comments, refundAmount: returnOrderTotal }
+        });
+      }
     } catch (e) {
-      console.error('[OrderService] Return notif error:', e.message);
+      console.error('[OrderService] Return notif/email error:', e.message);
     }
   })();
 

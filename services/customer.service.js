@@ -56,33 +56,68 @@ exports.login = async ({ email, password }) => {
   }
 
   const token = jwt.sign({ id: customer._id, type: 'customer' }, JWT_SECRET);
-  return { token };
+  return {
+    token,
+    user: {
+      id: customer._id,
+      name: customer.name || '',
+      email: customer.email || '',
+      phone: customer.phone || '',
+      avatar: customer.avatar || ''
+    }
+  };
 };
 
 exports.getMe = async (req, res) => {
-  const customer = await Customer.findOne({ _id: req.customerId, isDeleted: { $ne: true } }).select('name email phone gender dateOfBirth createdAt');
+  const customer = await Customer.findOne({ _id: req.customerId, isDeleted: { $ne: true } }).select('name email phone gender dateOfBirth avatar createdAt');
   if (!customer) return res.status(404).json({ msg: 'Customer not found' });
   res.json(customer);
 };
 
 exports.updateMe = async (req, res) => {
-  const { name, email, phone = '', gender = '', dateOfBirth = '' } = req.body || {};
-  if (!name?.trim() || !/^\S+@\S+\.\S+$/.test(email || '')) return res.status(400).json({ msg: 'Valid name and email are required' });
-  if (phone && !/^[0-9]{10}$/.test(String(phone).trim())) return res.status(400).json({ msg: 'Phone number must be a valid 10-digit number' });
-  if (gender && !['male', 'female', 'other'].includes(String(gender).toLowerCase())) return res.status(400).json({ msg: 'Invalid gender' });
-  if (dateOfBirth && Number.isNaN(new Date(dateOfBirth).getTime())) return res.status(400).json({ msg: 'Invalid date of birth' });
-  const existing = await Customer.findOne({ email: email.trim(), _id: { $ne: req.customerId }, isDeleted: { $ne: true } });
-  if (existing) return res.status(400).json({ msg: 'Email already registered' });
-  const payload = {
-    name: name.trim(),
-    email: email.trim(),
-    phone: phone ? String(phone).trim() : '',
-    gender: gender ? String(gender).trim() : '',
-    dateOfBirth: dateOfBirth ? new Date(dateOfBirth).toISOString().slice(0, 10) : ''
-  };
-  const customer = await Customer.findOneAndUpdate({ _id: req.customerId, isDeleted: { $ne: true } }, payload, { returnDocument: 'after' }).select('name email phone gender dateOfBirth createdAt');
+  const { name, email, phone, gender, dateOfBirth, avatar } = req.body || {};
+
+  const customer = await Customer.findOne({ _id: req.customerId, isDeleted: { $ne: true } });
   if (!customer) return res.status(404).json({ msg: 'Customer not found' });
-  res.json(customer);
+
+  if (name !== undefined) {
+    if (!name?.trim()) return res.status(400).json({ msg: 'Valid name is required' });
+    customer.name = name.trim();
+  }
+  if (email !== undefined) {
+    if (!/^\S+@\S+\.\S+$/.test(email || '')) return res.status(400).json({ msg: 'Valid email is required' });
+    const existing = await Customer.findOne({ email: email.trim(), _id: { $ne: req.customerId }, isDeleted: { $ne: true } });
+    if (existing) return res.status(400).json({ msg: 'Email already registered' });
+    customer.email = email.trim();
+  }
+  if (phone !== undefined) {
+    if (phone && !/^[0-9]{10}$/.test(String(phone).trim())) return res.status(400).json({ msg: 'Phone number must be a valid 10-digit number' });
+    customer.phone = phone ? String(phone).trim() : '';
+  }
+  if (gender !== undefined) {
+    if (gender && !['male', 'female', 'other'].includes(String(gender).toLowerCase())) return res.status(400).json({ msg: 'Invalid gender' });
+    customer.gender = gender ? String(gender).trim() : '';
+  }
+  if (dateOfBirth !== undefined) {
+    if (dateOfBirth && Number.isNaN(new Date(dateOfBirth).getTime())) return res.status(400).json({ msg: 'Invalid date of birth' });
+    customer.dateOfBirth = dateOfBirth ? new Date(dateOfBirth).toISOString().slice(0, 10) : '';
+  }
+  if (avatar !== undefined) {
+    customer.avatar = avatar || '';
+  }
+
+  await customer.save();
+
+  res.json({
+    _id: customer._id,
+    name: customer.name,
+    email: customer.email,
+    phone: customer.phone,
+    gender: customer.gender,
+    dateOfBirth: customer.dateOfBirth,
+    avatar: customer.avatar || '',
+    createdAt: customer.createdAt
+  });
 };
 
 exports.changePassword = async (req, res) => {

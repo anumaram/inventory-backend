@@ -43,7 +43,10 @@ exports.getWishlist = async (req, res) => {
         quantity: { $ifNull: ['$product.quantity', 0] },
         rating: { $ifNull: ['$product.rating', 0] },
         ratingCount: { $ifNull: ['$product.ratingCount', 0] },
-        vendorName: { $ifNull: ['$vendor.name', 'Unknown'] }
+        vendorName: { $ifNull: ['$vendor.name', 'Unknown'] },
+        addedPrice: { $ifNull: ['$addedPrice', '$product.price'] },
+        notifyBackInStock: { $ifNull: ['$notifyBackInStock', true] },
+        notifyPriceDrop: { $ifNull: ['$notifyPriceDrop', true] }
       }
     }
   ]);
@@ -56,6 +59,14 @@ exports.addToWishlist = async (req, res) => {
   if (!productId) {
     return res.status(400).json({ msg: 'Product is required' });
   }
+
+  const product = await Product.findById(productId).select('category price discountPercentage quantity').lean();
+  if (!product) {
+    return res.status(404).json({ msg: 'Product not found' });
+  }
+
+  const discount = Number(product.discountPercentage ?? 10);
+  const effectivePrice = Math.round(Number(product.price || 0) * (1 - discount / 100));
 
   let targetCollectionId = collectionId;
   if (!targetCollectionId || !mongoose.Types.ObjectId.isValid(targetCollectionId)) {
@@ -86,7 +97,15 @@ exports.addToWishlist = async (req, res) => {
     if (existing.isDeleted) {
       const updated = await Wishlist.findOneAndUpdate(
         { _id: existing._id },
-        { isDeleted: false, collectionId: targetCollectionId },
+        {
+          isDeleted: false,
+          collectionId: targetCollectionId,
+          addedPrice: effectivePrice,
+          notifyBackInStock: true,
+          notifyPriceDrop: true,
+          lastNotifiedPrice: effectivePrice,
+          lastNotifiedStock: Number(product.quantity || 0)
+        },
         { returnDocument: 'after' }
       );
       return res.json(updated);
@@ -102,16 +121,16 @@ exports.addToWishlist = async (req, res) => {
     return res.json(existing);
   }
 
-  const product = await Product.findById(productId).select('category').lean();
-  if (!product) {
-    return res.status(404).json({ msg: 'Product not found' });
-  }
-
   const item = await Wishlist.create({
     customerId: req.customerId,
     productId,
     collectionId: targetCollectionId,
-    category: product.category || 'Others'
+    category: product.category || 'Others',
+    addedPrice: effectivePrice,
+    notifyBackInStock: true,
+    notifyPriceDrop: true,
+    lastNotifiedPrice: effectivePrice,
+    lastNotifiedStock: Number(product.quantity || 0)
   });
   res.json(item);
 };
@@ -229,4 +248,94 @@ exports.deleteCollection = async (req, res) => {
 
   await WishlistCollection.deleteOne({ _id: colId, customerId: cId });
   res.json({ msg: 'Collection deleted successfully', fallbackCollectionId: fallback._id });
+};
+
+exports.updateWishlistAlerts = async (req, res) => {
+  const { id } = req.params;
+  const { notifyBackInStock, notifyPriceDrop } = req.body || {};
+  const updateData = {};
+  if (notifyBackInStock !== undefined) updateData.notifyBackInStock = Boolean(notifyBackInStock);
+  if (notifyPriceDrop !== undefined) updateData.notifyPriceDrop = Boolean(notifyPriceDrop);
+
+  const updated = await Wishlist.findOneAndUpdate(
+    { _id: toObjectId(id), customerId: toObjectId(req.customerId), isDeleted: { $ne: true } },
+    updateData,
+    { returnDocument: 'after' }
+  );
+  if (!updated) return res.status(404).json({ msg: 'Wishlist item not found' });
+  res.json(updated);
+};
+
+/**
+ * Trigger back-in-stock and price-drop notifications for wishlisted products
+ */
+exports.checkAndNotifyWishlistAlerts = async ({
+  productId,
+  productName,
+  oldStock,
+  newStock,
+  oldPrice,
+  newPrice,
+  oldDiscount = 10,
+  newDiscount = 10
+}) => {
+  try {
+    const notificationService = require('./notification.service');
+    const pId = toObjectId(productId);
+
+    // 1. Back-in-Stock Alert
+    if (Number(oldStock) <= 0 && Number(newStock) > 0) {
+      const stockWishlists = await Wishlist.find({
+        productId: pId,
+        isDeleted: { $ne: true },
+        notifyBackInStock: { $ne: false }
+      }).lean();
+
+      for (const item of stockWishlists) {
+        await notificationService.createNotification({
+          recipientType: 'customer',
+          recipientId: item.customerId,
+          title: 'Back in Stock! 🎉',
+          message: `Good news! "${productName}" is back in stock with ${newStock} units available.`,
+          type: 'back_in_stock',
+          productId: pId,
+          actionLabel: 'View Product',
+          actionUrl: `/customer/products/${productId}`
+        });
+      }
+    }
+
+    // 2. Price Drop Alert
+    const oldEff = Math.round(Number(oldPrice || 0) * (1 - Number(oldDiscount ?? 10) / 100));
+    const newEff = Math.round(Number(newPrice || 0) * (1 - Number(newDiscount ?? 10) / 100));
+
+    if (newEff < oldEff && newEff > 0) {
+      const priceWishlists = await Wishlist.find({
+        productId: pId,
+        isDeleted: { $ne: true },
+        notifyPriceDrop: { $ne: false }
+      });
+
+      for (const item of priceWishlists) {
+        const threshold = item.addedPrice || oldEff;
+        if (newEff < threshold) {
+          const dropAmount = threshold - newEff;
+          await notificationService.createNotification({
+            recipientType: 'customer',
+            recipientId: item.customerId,
+            title: 'Price Drop Alert! 🏷️',
+            message: `"${productName}" dropped by ₹${dropAmount.toLocaleString('en-IN')}! Now available at ₹${newEff.toLocaleString('en-IN')}.`,
+            type: 'price_drop',
+            productId: pId,
+            actionLabel: 'View Product',
+            actionUrl: `/customer/products/${productId}`
+          });
+          item.lastNotifiedPrice = newEff;
+          await item.save().catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[WishlistService] Error notifying wishlist alerts:', err.message);
+  }
 };

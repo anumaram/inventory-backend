@@ -35,6 +35,14 @@ router.patch('/:id', customerAuth, async (req, res) => {
   }
 });
 
+router.patch('/:id/default', customerAuth, async (req, res) => {
+  try {
+    await service.setDefaultAddress(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to set default address' });
+  }
+});
+
 router.delete('/:id', customerAuth, async (req, res) => {
   try {
     await service.deleteAddress(req, res);

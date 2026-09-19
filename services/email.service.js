@@ -4,7 +4,9 @@ const EMAIL_USER = process.env.EMAIL_USER || 'noreply.2k2x@gmail.com';
 const EMAIL_PASS = process.env.EMAIL_PASS || 'ezuw bjxh rywm vlwf';
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
   auth: {
     user: EMAIL_USER,
     pass: EMAIL_PASS,
@@ -261,6 +263,153 @@ async function sendOrderStatusUpdateEmail({ order, customer, status }) {
     console.log(`[EmailService] Order status email (${status}) sent to ${customer.email} (#${orderId})`);
   } catch (err) {
     console.error(`[EmailService] Error sending status update email:`, err.message);
+  }
+}
+
+/**
+ * 3B. Send Return Request Confirmation Email to Customer
+ */
+async function sendReturnRequestedCustomerEmail({ order, customer, returnRecord = {} }) {
+  if (!customer?.email) return;
+
+  const orderId = order.orderId || (order._id ? String(order._id).slice(-8).toUpperCase() : 'ORD');
+  const returnReason = returnRecord.reason || order.returnReason || 'Defective / Not as described';
+  const refundAmount = Number(returnRecord.refundAmount || order.refundAmount || order.totalAmount || 0);
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <body style="margin: 0; padding: 20px; background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+      <div style="max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 14px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.06);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #f59e0b, #d97706); padding: 28px; text-align: center; color: #ffffff;">
+          <h2 style="margin: 0 0 6px; font-size: 22px; font-weight: 800;">Return Request Received ↩️</h2>
+          <p style="margin: 0; font-size: 14px; opacity: 0.95;">Order #${orderId}</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="padding: 24px 28px;">
+          <p style="font-size: 15px; color: #334155; margin: 0 0 18px; line-height: 1.5;">
+            Hi <strong>${customer.name || 'Valued Customer'}</strong>,<br>
+            We have received your return request for <strong>Order #${orderId}</strong>. Our seller operations team is reviewing the request and doorstep pickup will be scheduled shortly.
+          </p>
+
+          <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 16px; margin-bottom: 20px;">
+            <table style="width: 100%; font-size: 13.5px; color: #78350f;">
+              <tr>
+                <td style="padding: 4px 0; font-weight: 700; width: 140px;">Return Reason:</td>
+                <td style="padding: 4px 0;">${returnReason}</td>
+              </tr>
+              <tr>
+                <td style="padding: 4px 0; font-weight: 700;">Est. Refund Value:</td>
+                <td style="padding: 4px 0; font-weight: 800; color: #b45309;">${formatINR(refundAmount)}</td>
+              </tr>
+              <tr>
+                <td style="padding: 4px 0; font-weight: 700;">Pickup Window:</td>
+                <td style="padding: 4px 0;">Within 24 to 48 business hours</td>
+              </tr>
+            </table>
+          </div>
+
+          <div style="border-left: 3px solid #f59e0b; padding-left: 14px; margin-bottom: 22px; font-size: 13px; color: #64748b; line-height: 1.5;">
+            <strong>Next Steps:</strong> Please keep the product, original brand tags, box, and invoice intact. The delivery partner will inspect the product upon pickup.
+          </div>
+
+          <div style="text-align: center;">
+            <a href="http://localhost:5173/customer/orders" style="display: inline-block; background: #0f172a; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 11px 26px; border-radius: 8px;">
+              Track Return Status
+            </a>
+          </div>
+        </div>
+
+        <div style="padding: 14px 28px; background: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
+          Inventory E-Commerce Portal • Automated Order Care
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Inventory Support" <${EMAIL_USER}>`,
+      to: customer.email,
+      subject: `Return Request Received - Order #${orderId}`,
+      html,
+    });
+    console.log(`[EmailService] Return requested email sent to ${customer.email} for #${orderId}`);
+  } catch (err) {
+    console.error(`[EmailService] Error sending return request email:`, err.message);
+  }
+}
+
+/**
+ * 3C. Send Refund Credited Confirmation Email to Customer
+ */
+async function sendReturnRefundCreditedEmail({ order, customer, refundAmount = 0, refundMethod = 'wallet', returnRecord = {} }) {
+  if (!customer?.email) return;
+
+  const orderId = order.orderId || (order._id ? String(order._id).slice(-8).toUpperCase() : 'ORD');
+  const amount = Number(refundAmount || order.refundAmount || order.totalAmount || 0);
+  const methodLabel = refundMethod === 'wallet' ? 'Store Wallet Balance' : 'Original Payment Source';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <body style="margin: 0; padding: 20px; background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+      <div style="max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 14px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.06);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #10b981, #059669); padding: 28px; text-align: center; color: #ffffff;">
+          <h2 style="margin: 0 0 6px; font-size: 22px; font-weight: 800;">Refund Credited! 💰</h2>
+          <p style="margin: 0; font-size: 14px; opacity: 0.95;">Order #${orderId}</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="padding: 24px 28px; text-align: center;">
+          <div style="display: inline-block; background: #ecfdf5; border: 2px dashed #a7f3d0; border-radius: 12px; padding: 16px 28px; margin-bottom: 20px;">
+            <div style="font-size: 12px; font-weight: 700; color: #065f46; text-transform: uppercase;">Amount Credited</div>
+            <div style="font-size: 28px; font-weight: 800; color: #059669;">${formatINR(amount)}</div>
+            <div style="font-size: 12px; color: #047857; margin-top: 3px;">Credited to ${methodLabel}</div>
+          </div>
+
+          <p style="font-size: 15px; color: #334155; margin: 0 0 18px; line-height: 1.5; text-align: left;">
+            Hi <strong>${customer.name || 'Valued Customer'}</strong>,<br>
+            Your returned items for <strong>Order #${orderId}</strong> have passed merchant verification and the refund of <strong>${formatINR(amount)}</strong> has been successfully credited.
+          </p>
+
+          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 18px; margin-bottom: 22px; text-align: left;">
+            <div style="font-size: 13px; color: #475569; line-height: 1.6;">
+              <div>• <strong>Status:</strong> <span style="color: #059669; font-weight: 700;">Completed / Credited</span></div>
+              <div>• <strong>Payment Mode:</strong> Instant Wallet Balance</div>
+              <div>• <strong>Availability:</strong> Ready to use on your next checkout</div>
+            </div>
+          </div>
+
+          <div style="text-align: center;">
+            <a href="http://localhost:5173/customer/settings" style="display: inline-block; background: #0f172a; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 11px 26px; border-radius: 8px;">
+              View Wallet Balance
+            </a>
+          </div>
+        </div>
+
+        <div style="padding: 14px 28px; background: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
+          Inventory E-Commerce Portal • Automated Refund Service
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Inventory Finance" <${EMAIL_USER}>`,
+      to: customer.email,
+      subject: `Refund Credited: ${formatINR(amount)} for Order #${orderId}`,
+      html,
+    });
+    console.log(`[EmailService] Refund credited email sent to ${customer.email} for #${orderId} (${formatINR(amount)})`);
+  } catch (err) {
+    console.error(`[EmailService] Error sending refund credited email:`, err.message);
   }
 }
 
@@ -912,10 +1061,102 @@ async function sendDailyVendorDigestEmail({ vendor, orders = [], transactions = 
   }
 }
 
+/**
+ * 14. Send Support Ticket Resolution Email to Customer
+ */
+async function sendTicketResolvedCustomerEmail({ ticket, customerEmail, customerName, resolutionMessage }) {
+  const toEmail = customerEmail || ticket?.userEmail;
+  if (!toEmail) return;
+
+  const ticketId = ticket.ticketId || 'TKT';
+  const subject = ticket.subject || 'Support Request';
+  const name = customerName || ticket.userName || 'Valued Customer';
+  const resolution = resolutionMessage || ticket.resolutionSummary || 'Your support request has been marked as resolved by our customer care team.';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+      <div style="max-width: 600px; margin: 30px auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: 1px solid #e2e8f0;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #10b981, #059669); padding: 28px 32px; text-align: center; color: #ffffff;">
+          <div style="font-size: 32px; margin-bottom: 8px;">✓</div>
+          <h1 style="margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.5px;">Support Ticket Resolved</h1>
+          <p style="margin: 6px 0 0; opacity: 0.9; font-size: 14px;">Ticket #${ticketId} has been successfully resolved</p>
+        </div>
+
+        <!-- Body -->
+        <div style="padding: 32px;">
+          <p style="font-size: 15px; color: #334155; margin: 0 0 16px;">Dear <strong>${name}</strong>,</p>
+          <p style="font-size: 14px; color: #475569; line-height: 1.6; margin: 0 0 20px;">
+            Thank you for contacting Customer Support. We are pleased to inform you that your support ticket regarding <strong>"${subject}"</strong> has been resolved.
+          </p>
+
+          <!-- Resolution Box -->
+          <div style="background: #f0fdf4; border: 1.5px solid #bbf7d0; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+            <div style="font-size: 12px; font-weight: 700; text-transform: uppercase; color: #166534; letter-spacing: 0.05em; margin-bottom: 8px;">
+              Resolution Details
+            </div>
+            <div style="font-size: 14px; color: #15803d; line-height: 1.6;">
+              ${resolution}
+            </div>
+          </div>
+
+          <!-- Ticket Summary Table -->
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13.5px;">
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 8px 0; color: #64748b;">Ticket ID:</td>
+              <td style="padding: 8px 0; color: #0f172a; font-weight: 600; text-align: right;">#${ticketId}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 8px 0; color: #64748b;">Category:</td>
+              <td style="padding: 8px 0; color: #0f172a; font-weight: 600; text-align: right; text-transform: capitalize;">${ticket.category || 'General'}</td>
+            </tr>
+            ${ticket.orderId ? `
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 8px 0; color: #64748b;">Linked Order:</td>
+              <td style="padding: 8px 0; color: #2563eb; font-weight: 600; text-align: right;">${ticket.orderId}</td>
+            </tr>` : ''}
+            <tr>
+              <td style="padding: 8px 0; color: #64748b;">Status:</td>
+              <td style="padding: 8px 0; color: #16a34a; font-weight: 700; text-align: right;">RESOLVED</td>
+            </tr>
+          </table>
+
+          <p style="font-size: 13px; color: #64748b; line-height: 1.5; margin: 0 0 16px;">
+            If you need further assistance or if your issue has not been fully resolved, you can re-open this ticket or reply directly from your Support Center inside the app.
+          </p>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 16px 28px; background: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #64748b;">
+          <p style="margin: 0;">Inventory Pro Support Desk • 24x7 Customer Care Helpline: 1800-123-4567</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Inventory Customer Support" <${EMAIL_USER}>`,
+      to: toEmail,
+      subject: `[Resolved] Ticket #${ticketId}: ${subject}`,
+      html,
+    });
+    console.log(`[EmailService] Ticket resolution email sent to ${toEmail} for #${ticketId}`);
+  } catch (err) {
+    console.error(`[EmailService] Error sending ticket resolution email:`, err.message);
+  }
+}
+
 module.exports = {
   sendOrderPlacedCustomerEmail,
   sendOrderPlacedVendorEmail,
   sendOrderStatusUpdateEmail,
+  sendReturnRequestedCustomerEmail,
+  sendReturnRefundCreditedEmail,
   sendOtpEmail,
   sendPasswordResetEmail,
   sendMonthlyVendorPayoutEmail,
@@ -924,6 +1165,7 @@ module.exports = {
   sendSixMonthReviewEmail,
   sendAnnualReviewEmail,
   sendDailyVendorDigestEmail,
+  sendTicketResolvedCustomerEmail,
 };
 
 

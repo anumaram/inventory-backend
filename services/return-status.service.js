@@ -172,6 +172,16 @@ async function synchronizeReturnStatuses() {
                       meta: { automated: true, returnType: type || 'return', returnId: record.returnId || String(record._id) }
                     });
                   }
+                  if (customer.email) {
+                    const emailService = require('./email.service');
+                    await emailService.sendReturnRefundCreditedEmail({
+                      order: { orderId: record.orderId, _id: record.orderRef },
+                      customer,
+                      refundAmount: Number(record.refundAmount),
+                      refundMethod: 'wallet',
+                      returnRecord: record
+                    });
+                  }
                 }
               }
             } catch (walletErr) {

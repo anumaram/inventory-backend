@@ -29,6 +29,7 @@ const Address = require('../models/address.model');
 
 const emailService = require('./email.service');
 const emailCronService = require('./email-cron.service');
+const notificationService = require('./notification.service');
 const JWT_SECRET = process.env.JWT_SECRET || 'secret';
 
 // In-memory OTP storage for Admin login
@@ -944,7 +945,35 @@ exports.replySupportTicket = async (req, res) => {
     });
 
     if (status) ticket.status = status;
+    if (status === 'resolved' || status === 'closed') {
+      ticket.resolvedAt = new Date();
+      ticket.resolvedBy = req.admin?.name || 'Admin Support Desk';
+    }
     await ticket.save();
+
+    // In-app notification for Customer whenever ticket is resolved or closed from admin desk
+    if (ticket.customerId && (ticket.status === 'resolved' || ticket.status === 'closed')) {
+      try {
+        const isResolved = ticket.status === 'resolved';
+        const notifTitle = `Support Ticket ${isResolved ? 'Resolved' : 'Closed'} (#${ticket.ticketId || String(ticket._id).slice(-6).toUpperCase()})`;
+        const notifMsg = `Your ticket regarding "${ticket.subject}" has been marked as ${ticket.status} by Admin Support.${
+          text ? ` Response: ${text.slice(0, 120)}` : ''
+        }`;
+
+        await notificationService.createNotification({
+          recipientType: 'customer',
+          recipientId: ticket.customerId,
+          title: notifTitle,
+          message: notifMsg,
+          type: 'support',
+          orderId: ticket.orderId || '',
+          productId: ticket.productId || null,
+          actionUrl: '/customer/tickets'
+        });
+      } catch (notifErr) {
+        console.warn('[AdminSupport] Failed to send customer notification:', notifErr.message);
+      }
+    }
 
     res.json({ msg: 'Reply sent successfully', ticket });
   } catch (err) {
@@ -1458,37 +1487,49 @@ exports.getNotificationsList = async (req, res) => {
 exports.broadcastNotification = async (req, res) => {
   try {
     const { title, message, target, type } = req.body;
+    if (!title || !message) {
+      return res.status(400).json({ msg: 'Title and message are required' });
+    }
     let recipients = [];
 
     if (target === 'customers' || target === 'all') {
       const customers = await Customer.find({ isDeleted: { $ne: true } }).select('_id');
-      const docs = customers.map(c => ({
-        userId: c._id,
-        userType: 'customer',
-        title,
-        message,
-        type: type || 'info'
-      }));
-      await Notification.insertMany(docs);
-      recipients.push(`${customers.length} customers`);
+      if (customers.length > 0) {
+        const docs = customers.map(c => ({
+          recipientId: c._id,
+          recipientType: 'customer',
+          userId: c._id,
+          userType: 'customer',
+          title,
+          message,
+          type: type || 'general'
+        }));
+        await Notification.insertMany(docs);
+        recipients.push(`${customers.length} customers`);
+      }
     }
 
     if (target === 'vendors' || target === 'all') {
       const vendors = await User.find({ isDeleted: { $ne: true } }).select('_id');
-      const docs = vendors.map(v => ({
-        userId: v._id,
-        userType: 'vendor',
-        title,
-        message,
-        type: type || 'info'
-      }));
-      await Notification.insertMany(docs);
-      recipients.push(`${vendors.length} vendors`);
+      if (vendors.length > 0) {
+        const docs = vendors.map(v => ({
+          recipientId: v._id,
+          recipientType: 'vendor',
+          userId: v._id,
+          userType: 'vendor',
+          title,
+          message,
+          type: type || 'general'
+        }));
+        await Notification.insertMany(docs);
+        recipients.push(`${vendors.length} vendors`);
+      }
     }
 
-    await logAudit(req.admin?.id, req.admin?.name, 'BROADCAST_NOTIFICATION', 'notification', '', `Broadcast "${title}" to ${target}`);
-    res.json({ msg: `Notification broadcast sent successfully to ${recipients.join(' and ')}` });
+    await logAudit(req.admin?.id || req.adminId, req.admin?.name || 'Admin', 'BROADCAST_NOTIFICATION', 'notification', '', `Broadcast "${title}" to ${target}`);
+    res.json({ msg: `Notification broadcast sent successfully to ${recipients.join(' and ') || 'target audience'}` });
   } catch (err) {
+    console.error('Broadcast notification error:', err);
     res.status(500).json({ msg: err.message });
   }
 };
@@ -1957,9 +1998,15 @@ exports.getActivityFeed = async (req, res) => {
 // ==========================================
 exports.triggerMonthlyVendorEmails = async (req, res) => {
   try {
-    const result = await emailCronService.dispatchMonthlyEmails(true);
+    res.json({ success: true, msg: 'Monthly vendor payout statements dispatch initiated in background.' });
+    setImmediate(async () => {
+      try {
+        await emailCronService.dispatchMonthlyEmails(true, { skipAdmin: true, onlyVendors: true });
+      } catch (err) {
+        console.error('[triggerMonthlyVendorEmails] Background error:', err.message);
+      }
+    });
     await logAudit(req.adminId, req.admin?.name, 'TRIGGER_MONTHLY_EMAILS', 'cron_service', 'vendors', 'Manual trigger of monthly vendor payout statements');
-    res.json({ success: true, msg: 'Monthly vendor emails triggered successfully', result });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -1967,9 +2014,48 @@ exports.triggerMonthlyVendorEmails = async (req, res) => {
 
 exports.triggerMonthlyAdminEmail = async (req, res) => {
   try {
-    const result = await emailCronService.dispatchMonthlyEmails(true);
-    await logAudit(req.adminId, req.admin?.name, 'TRIGGER_MONTHLY_ADMIN_EMAIL', 'cron_service', 'admin', 'Manual trigger of monthly admin revenue digest');
-    res.json({ success: true, msg: 'Monthly admin digest email triggered successfully', result });
+    const admin = req.admin || (req.adminId ? await Admin.findById(req.adminId) : null) || await Admin.findOne({ isDeleted: { $ne: true } });
+    if (!admin) {
+      return res.status(404).json({ msg: 'Admin account not found' });
+    }
+
+    res.json({ success: true, msg: `Monthly executive digest dispatched to ${admin.email}`, recipient: admin.email });
+
+    setImmediate(async () => {
+      try {
+        const now = new Date();
+        const monthLabel = now.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+        const [orderAgg, vCount, cCount] = await Promise.all([
+          Order.aggregate([
+            { $match: { isDeleted: { $ne: true } } },
+            { $group: { _id: null, totalOrders: { $sum: 1 }, grossVolume: { $sum: '$totalAmount' }, totalRefunds: { $sum: '$refundAmount' } } }
+          ]),
+          User.countDocuments({ isDeleted: { $ne: true } }),
+          Customer.countDocuments({ isDeleted: { $ne: true } })
+        ]);
+
+        const stats = orderAgg[0] || { totalOrders: 0, grossVolume: 0, totalRefunds: 0 };
+        const commissionEarned = stats.grossVolume * 0.05;
+
+        await emailService.sendMonthlyAdminRevenueEmail({
+          admin,
+          metrics: {
+            grossVolume: stats.grossVolume,
+            commissionEarned,
+            netRevenue: commissionEarned,
+            totalOrders: stats.totalOrders,
+            totalRefunds: stats.totalRefunds,
+            activeVendors: vCount,
+            activeCustomers: cCount
+          },
+          month: monthLabel
+        });
+
+        await logAudit(req.adminId, req.admin?.name, 'TRIGGER_MONTHLY_ADMIN_EMAIL', 'cron_service', 'admin', `Manual trigger of monthly admin digest to ${admin.email}`);
+      } catch (err) {
+        console.error('[triggerMonthlyAdminEmail] Background error:', err.message);
+      }
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -1978,23 +2064,279 @@ exports.triggerMonthlyAdminEmail = async (req, res) => {
 exports.triggerScheduledEmails = async (req, res) => {
   try {
     const { type = 'monthly', force = true } = req.body || {};
-    let result;
-    if (type === 'daily_vendor' || type === 'daily') {
-      result = await emailCronService.dispatchDailyVendorDigests(force);
-    } else if (type === 'monthly') {
-      result = await emailCronService.dispatchMonthlyEmails(force);
-    } else if (type === 'six_month') {
-      result = await emailCronService.dispatchSixMonthEmails(force);
-    } else if (type === 'annual') {
-      result = await emailCronService.dispatchAnnualEmails(force);
-    } else {
+    const admin = req.admin || (req.adminId ? await Admin.findById(req.adminId) : null) || await Admin.findOne({ isDeleted: { $ne: true } });
+    if (!admin) {
+      return res.status(404).json({ msg: 'Admin account not found' });
+    }
+
+    if (!['daily_vendor', 'daily', 'monthly', 'six_month', 'annual'].includes(type)) {
       return res.status(400).json({ msg: 'Invalid schedule type. Must be "daily_vendor", "monthly", "six_month", or "annual".' });
     }
 
-    await logAudit(req.adminId, req.admin?.name, `TRIGGER_${type.toUpperCase()}_EMAILS`, 'cron_service', type, `Admin manually triggered ${type} emails`);
-    res.json({ success: true, msg: `Scheduled ${type} emails triggered successfully`, result });
+    // Respond immediately to the frontend so the UI releases and provides instant feedback
+    res.json({
+      success: true,
+      msg: `Executive ${type} report dispatched to ${admin.email}! Statements are being sent in the background.`,
+      recipient: admin.email,
+      type
+    });
+
+    await logAudit(req.adminId, req.admin?.name, `TRIGGER_${type.toUpperCase()}_EMAILS`, 'cron_service', type, `Admin manually triggered ${type} emails (direct copy dispatched to ${admin.email})`);
+
+    // Execute background dispatch: Admin email first, followed by vendor and customer statements
+    setImmediate(async () => {
+      try {
+        const now = new Date();
+        const monthLabel = now.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+        const halfYear = now.getMonth() < 6 ? 'H1' : 'H2';
+        const periodSixMonth = `${halfYear} ${now.getFullYear()}`;
+        const yearLabel = `${now.getFullYear()}`;
+
+        // 1. Deliver direct executive report to admin
+        if (type === 'monthly') {
+          const [orderAgg, vCount, cCount] = await Promise.all([
+            Order.aggregate([
+              { $match: { isDeleted: { $ne: true } } },
+              { $group: { _id: null, totalOrders: { $sum: 1 }, grossVolume: { $sum: '$totalAmount' }, totalRefunds: { $sum: '$refundAmount' } } }
+            ]),
+            User.countDocuments({ isDeleted: { $ne: true } }),
+            Customer.countDocuments({ isDeleted: { $ne: true } })
+          ]);
+          const stats = orderAgg[0] || { totalOrders: 0, grossVolume: 0, totalRefunds: 0 };
+          const commissionEarned = stats.grossVolume * 0.05;
+
+          await emailService.sendMonthlyAdminRevenueEmail({
+            admin,
+            metrics: {
+              grossVolume: stats.grossVolume,
+              commissionEarned,
+              netRevenue: commissionEarned,
+              totalOrders: stats.totalOrders,
+              totalRefunds: stats.totalRefunds,
+              activeVendors: vCount,
+              activeCustomers: cCount
+            },
+            month: monthLabel
+          });
+        } else if (type === 'six_month') {
+          const allOrders = await Order.find({ isDeleted: { $ne: true } });
+          const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+          await emailService.sendSixMonthReviewEmail({
+            recipient: admin,
+            userType: 'admin',
+            metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
+            period: periodSixMonth
+          });
+        } else if (type === 'annual') {
+          const allOrders = await Order.find({ isDeleted: { $ne: true } });
+          const gmv = allOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+          await emailService.sendAnnualReviewEmail({
+            recipient: admin,
+            userType: 'admin',
+            metrics: { volume: gmv, netProfit: gmv * 0.05, ordersCount: allOrders.length },
+            year: yearLabel
+          });
+        } else if (type === 'daily_vendor' || type === 'daily') {
+          const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+          const todayOrders = await Order.find({ isDeleted: { $ne: true }, createdAt: { $gte: startOfDay, $lte: endOfDay } });
+          const todayVolume = todayOrders.reduce((s, o) => s + (o.totalAmount || 0), 0);
+
+          await emailService.sendMonthlyAdminRevenueEmail({
+            admin,
+            metrics: {
+              grossVolume: todayVolume,
+              commissionEarned: todayVolume * 0.05,
+              netRevenue: todayVolume * 0.05,
+              totalOrders: todayOrders.length,
+              totalRefunds: 0,
+              activeVendors: await User.countDocuments({ isDeleted: { $ne: true } }),
+              activeCustomers: await Customer.countDocuments({ isDeleted: { $ne: true } })
+            },
+            month: `Daily EOD Digest (${now.toLocaleDateString('en-IN')})`
+          });
+        }
+
+        // 2. Dispatch vendor and customer batches in background
+        if (type === 'daily_vendor' || type === 'daily') {
+          await emailCronService.dispatchDailyVendorDigests(force);
+        } else if (type === 'monthly') {
+          await emailCronService.dispatchMonthlyEmails(force, { skipAdmin: true });
+        } else if (type === 'six_month') {
+          await emailCronService.dispatchSixMonthEmails(force, { skipAdmin: true });
+        } else if (type === 'annual') {
+          await emailCronService.dispatchAnnualEmails(force, { skipAdmin: true });
+        }
+      } catch (bgErr) {
+        console.error(`[EmailCron] Background dispatch error for ${type}:`, bgErr.message);
+      }
+    });
+
+  } catch (err) {
+    console.error('[triggerScheduledEmails] Error:', err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * ==========================================
+ * WAREHOUSES & INVENTORY TRANSFERS
+ * ==========================================
+ */
+exports.getWarehouses = async (req, res) => {
+  try {
+    const warehouses = await Warehouse.find({ isDeleted: { $ne: true } }).sort({ name: 1 }).lean();
+    res.json({ items: warehouses, total: warehouses.length });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
+
+exports.createWarehouse = async (req, res) => {
+  try {
+    const { code, name, location, address, city, state, pincode, capacity } = req.body;
+    if (!code || !name) {
+      return res.status(400).json({ msg: 'Warehouse code and name are required' });
+    }
+
+    const existing = await Warehouse.findOne({ code: code.trim().toUpperCase() });
+    if (existing) {
+      return res.status(400).json({ msg: `Warehouse with code ${code} already exists` });
+    }
+
+    const warehouse = await Warehouse.create({
+      code: code.trim().toUpperCase(),
+      name: name.trim(),
+      location: location || '',
+      address: address || '',
+      city: city || '',
+      state: state || '',
+      pincode: pincode || '',
+      capacity: Number(capacity) || 10000,
+      isActive: true
+    });
+
+    res.status(201).json({ msg: 'Warehouse created successfully', warehouse });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.getTransfers = async (req, res) => {
+  try {
+    const { status, q } = req.query;
+    const filter = {};
+    if (status && status !== 'all') filter.status = status;
+    if (q && q.trim()) {
+      filter.$or = [
+        { transferId: new RegExp(q.trim(), 'i') },
+        { notes: new RegExp(q.trim(), 'i') },
+        { 'items.productName': new RegExp(q.trim(), 'i') }
+      ];
+    }
+
+    const items = await InventoryTransfer.find(filter)
+      .populate('fromWarehouseId', 'code name city location')
+      .populate('toWarehouseId', 'code name city location')
+      .populate('items.productId', 'name price image quantity')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const [total, pendingCount, inTransitCount, completedCount] = await Promise.all([
+      InventoryTransfer.countDocuments(),
+      InventoryTransfer.countDocuments({ status: 'pending' }),
+      InventoryTransfer.countDocuments({ status: 'in_transit' }),
+      InventoryTransfer.countDocuments({ status: 'completed' })
+    ]);
+
+    res.json({
+      items,
+      total,
+      counts: {
+        total,
+        pending: pendingCount,
+        inTransit: inTransitCount,
+        completed: completedCount
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.createTransfer = async (req, res) => {
+  try {
+    const { fromWarehouseId, toWarehouseId, items, notes } = req.body;
+    if (!fromWarehouseId || !toWarehouseId) {
+      return res.status(400).json({ msg: 'Source and Destination warehouses are required' });
+    }
+    if (String(fromWarehouseId) === String(toWarehouseId)) {
+      return res.status(400).json({ msg: 'Source and destination warehouses cannot be the same' });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ msg: 'At least one item must be added to the transfer' });
+    }
+
+    const totalQty = items.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+    const transferId = `TRF-${Date.now().toString().slice(-6)}`;
+
+    // Populate product names if missing
+    const enrichedItems = await Promise.all(
+      items.map(async (it) => {
+        let name = it.productName;
+        if (!name && it.productId) {
+          const prod = await Product.findById(it.productId).select('name');
+          name = prod?.name || 'Product';
+        }
+        return {
+          productId: it.productId,
+          productName: name,
+          quantity: Number(it.quantity) || 1
+        };
+      })
+    );
+
+    const transfer = await InventoryTransfer.create({
+      transferId,
+      fromWarehouseId,
+      toWarehouseId,
+      items: enrichedItems,
+      totalQuantity: totalQty,
+      status: 'in_transit',
+      notes: notes || '',
+      dispatchedAt: new Date(),
+      initiatedBy: req.admin?.name || 'Admin'
+    });
+
+    res.status(201).json({ msg: 'Transfer initiated successfully', transfer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+exports.updateTransferStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!['pending', 'in_transit', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ msg: 'Invalid transfer status' });
+    }
+
+    const updateFields = { status };
+    if (status === 'completed') {
+      updateFields.receivedAt = new Date();
+    }
+
+    const transfer = await InventoryTransfer.findByIdAndUpdate(id, updateFields, { new: true })
+      .populate('fromWarehouseId', 'code name')
+      .populate('toWarehouseId', 'code name');
+
+    if (!transfer) return res.status(404).json({ msg: 'Transfer not found' });
+
+    res.json({ msg: `Transfer marked as ${status}`, transfer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
 

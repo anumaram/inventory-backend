@@ -13,6 +13,13 @@ const notificationSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      index: true
+    },
+    userType: {
+      type: String
+    },
     title: {
       type: String,
       required: true
@@ -38,6 +45,14 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    actionLabel: {
+      type: String,
+      default: ''
+    },
+    actionPayload: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
+    },
     isRead: {
       type: Boolean,
       default: false,
@@ -53,4 +68,3 @@ const notificationSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Notification', notificationSchema);
-

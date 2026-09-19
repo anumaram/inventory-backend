@@ -5,6 +5,7 @@ const cartSchema = new mongoose.Schema(
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
     qty: { type: Number, default: 1, min: 1 },
+    savedForLater: { type: Boolean, default: false },
     isDeleted: { type: Boolean, default: false }
   },
   { timestamps: true }

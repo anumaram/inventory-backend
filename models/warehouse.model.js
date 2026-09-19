@@ -11,6 +11,10 @@ const warehouseSchema = new mongoose.Schema(
     pincode: { type: String, default: '' },
     contactPerson: { type: String, default: '' },
     contactPhone: { type: String, default: '' },
+    coordinates: {
+      lat: { type: Number, default: 0 },
+      lng: { type: Number, default: 0 }
+    },
     capacity: { type: Number, default: 10000 },
     currentStockCount: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },

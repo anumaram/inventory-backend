@@ -11,11 +11,22 @@ const {
   getProductSearchMeta,
   getProductReviews,
   addProductReview,
+  updateProductReview,
+  deleteProductReview,
   updateProduct,
   deleteProduct,
   adjustProductStock,
-  getProductHistory
+  getProductHistory,
+  compareProductsAi
 } = require('../services/product.service');
+
+router.post('/compare-ai', async (req, res) => {
+  try {
+    await compareProductsAi(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Comparison failed' });
+  }
+});
 
 router.get('/public', async (req, res) => {
   try {
@@ -102,6 +113,30 @@ router.post('/:id/reviews', customerAuth, async (req, res) => {
     await addProductReview(req, res);
   } catch (err) {
     res.status(500).json({ msg: err.message || 'Failed to submit review' });
+  }
+});
+
+router.put('/:id/reviews/:reviewId', customerAuth, async (req, res) => {
+  try {
+    await updateProductReview(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to update review' });
+  }
+});
+
+router.patch('/:id/reviews/:reviewId', customerAuth, async (req, res) => {
+  try {
+    await updateProductReview(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to update review' });
+  }
+});
+
+router.delete('/:id/reviews/:reviewId', customerAuth, async (req, res) => {
+  try {
+    await deleteProductReview(req, res);
+  } catch (err) {
+    res.status(500).json({ msg: err.message || 'Failed to delete review' });
   }
 });
 

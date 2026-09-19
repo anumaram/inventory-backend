@@ -68,6 +68,7 @@ async function synchronizeOrderStatuses() {
           delivered: { title: 'Order Delivered 🎉', msg: `Your order #${oId} has been delivered successfully.` }
         }[targetStatus] || { title: `Order ${targetStatus}`, msg: `Status for #${oId} updated to ${targetStatus}` };
 
+        const actionLabel = targetStatus === 'delivered' ? 'View Order' : 'Track Order';
         await notificationService.createNotification({
           recipientType: 'customer',
           recipientId: order.customerId,
@@ -75,7 +76,8 @@ async function synchronizeOrderStatuses() {
           message: statusMeta.msg,
           type: `order_${targetStatus}`,
           orderId: oId,
-          actionUrl: '/customer/orders'
+          actionLabel,
+          actionUrl: `/customer/orders/${oId}/track`
         }).catch(e => console.error('[OrderStatusService] Notif error:', e.message));
 
         const customer = await Customer.findById(order.customerId);

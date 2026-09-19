@@ -169,6 +169,7 @@ exports.verifyOtpLogin = async ({ email, otp, userType = 'customer' }) => {
         id: targetUser._id,
         name: targetUser.name,
         email: targetUser.email,
+        phone: targetUser.phone || '',
         type: 'customer'
       }
     };
