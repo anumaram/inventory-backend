@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 const Admin = require('../models/admin.model');
 const User = require('../models/user.model');
@@ -194,36 +195,41 @@ exports.getVendors = async (req, res) => {
 };
 
 exports.updateVendor = async (req, res) => {
-  const updates = {};
-  if (req.body?.name) updates.name = req.body.name.trim();
-  if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
-  if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
-  if (req.body?.businessName !== undefined) updates.businessName = req.body.businessName.trim();
-  if (req.body?.password) {
-    if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
-    updates.password = await bcrypt.hash(req.body.password, 10);
+  try {
+    const updates = {};
+    if (req.body?.name) updates.name = req.body.name.trim();
+    if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
+    if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
+    if (req.body?.businessName !== undefined) updates.businessName = req.body.businessName.trim();
+    if (req.body?.password) {
+      if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+      updates.password = await bcrypt.hash(req.body.password, 10);
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ msg: 'No updates provided' });
+    }
+
+    if (updates.email) {
+      const existing = await User.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
+      if (existing) return res.status(400).json({ msg: 'Email is already used by another vendor' });
+    }
+
+    const vendor = await User.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
+      { $set: updates },
+      { returnDocument: 'after' }
+    ).select('-password -otp');
+
+    if (!vendor) {
+      return res.status(404).json({ msg: 'Vendor not found' });
+    }
+
+    res.json(vendor);
+  } catch (err) {
+    console.error('updateVendor error:', err);
+    res.status(500).json({ msg: err.message || 'Failed to update vendor' });
   }
-
-  if (!Object.keys(updates).length) {
-    return res.status(400).json({ msg: 'No updates provided' });
-  }
-
-  if (updates.email) {
-    const existing = await User.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
-    if (existing) return res.status(400).json({ msg: 'Email is already used by another vendor' });
-  }
-
-  const vendor = await User.findOneAndUpdate(
-    { _id: req.params.id, isDeleted: { $ne: true } },
-    { $set: updates },
-    { returnDocument: 'after' }
-  ).select('-password -otp');
-
-  if (!vendor) {
-    return res.status(404).json({ msg: 'Vendor not found' });
-  }
-
-  res.json(vendor);
 };
 
 exports.deleteVendor = async (req, res) => {
@@ -259,36 +265,41 @@ exports.getCustomers = async (req, res) => {
 };
 
 exports.updateCustomer = async (req, res) => {
-  const updates = {};
-  if (req.body?.name) updates.name = req.body.name.trim();
-  if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
-  if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
-  if (req.body?.gender !== undefined) updates.gender = req.body.gender;
-  if (req.body?.password) {
-    if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
-    updates.password = await bcrypt.hash(req.body.password, 10);
+  try {
+    const updates = {};
+    if (req.body?.name) updates.name = req.body.name.trim();
+    if (req.body?.email) updates.email = req.body.email.trim().toLowerCase();
+    if (req.body?.phone !== undefined) updates.phone = req.body.phone.trim();
+    if (req.body?.gender !== undefined) updates.gender = req.body.gender;
+    if (req.body?.password) {
+      if (req.body.password.length < 6) return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+      updates.password = await bcrypt.hash(req.body.password, 10);
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ msg: 'No updates provided' });
+    }
+
+    if (updates.email) {
+      const existing = await Customer.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
+      if (existing) return res.status(400).json({ msg: 'Email is already used by another customer' });
+    }
+
+    const customer = await Customer.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
+      { $set: updates },
+      { returnDocument: 'after' }
+    ).select('-password -otp');
+
+    if (!customer) {
+      return res.status(404).json({ msg: 'Customer not found' });
+    }
+
+    res.json(customer);
+  } catch (err) {
+    console.error('updateCustomer error:', err);
+    res.status(500).json({ msg: err.message || 'Failed to update customer' });
   }
-
-  if (!Object.keys(updates).length) {
-    return res.status(400).json({ msg: 'No updates provided' });
-  }
-
-  if (updates.email) {
-    const existing = await Customer.findOne({ email: updates.email, _id: { $ne: req.params.id }, isDeleted: { $ne: true } });
-    if (existing) return res.status(400).json({ msg: 'Email is already used by another customer' });
-  }
-
-  const customer = await Customer.findOneAndUpdate(
-    { _id: req.params.id, isDeleted: { $ne: true } },
-    { $set: updates },
-    { returnDocument: 'after' }
-  ).select('-password -otp');
-
-  if (!customer) {
-    return res.status(404).json({ msg: 'Customer not found' });
-  }
-
-  res.json(customer);
 };
 
 exports.deleteCustomer = async (req, res) => {
