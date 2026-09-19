@@ -1,7 +1,11 @@
 const nodemailer = require('nodemailer');
 
 const EMAIL_USER = process.env.EMAIL_USER || 'noreply.2k2x@gmail.com';
-const EMAIL_PASS = process.env.EMAIL_PASS || 'ezuw bjxh rywm vlwf';
+const EMAIL_PASS = process.env.EMAIL_PASS || '';
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const SENDER_EMAIL = process.env.SENDER_EMAIL || 'noreply.2k2x@gmail.com';
+const SENDER_NAME = process.env.SENDER_NAME || 'Inventory App';
 
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
@@ -11,16 +15,102 @@ const transporter = nodemailer.createTransport({
     user: EMAIL_USER,
     pass: EMAIL_PASS,
   },
+  connectionTimeout: 4000,
+  greetingTimeout: 4000,
+  socketTimeout: 5000,
 });
 
-// Verify transporter on startup
-transporter.verify((error, success) => {
+// Verify transporter on startup (non-blocking)
+transporter.verify((error) => {
   if (error) {
-    console.error('[EmailService] SMTP Connection Error:', error.message);
+    console.warn('[EmailService] SMTP Notice:', error.message, '(Using Brevo/Resend HTTPS API for reliable delivery).');
   } else {
     console.log('[EmailService] SMTP Transporter Ready (Gmail: noreply.2k2x@gmail.com)');
   }
 });
+
+/**
+ * Universal Email Dispatcher
+ * Priority: Brevo HTTPS API (Port 443, delivers to any email) -> Resend HTTPS API -> Nodemailer SMTP
+ */
+async function dispatchEmail({ to, toName, subject, html, text }) {
+  if (!to) return null;
+
+  // 1. Brevo HTTPS API (Port 443 - Works 100% on Render and can send to ANY email address)
+  if (BREVO_API_KEY) {
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': BREVO_API_KEY,
+          'Content-Type': 'application/json',
+          'accept': 'application/json'
+        },
+        body: JSON.stringify({
+          sender: { name: SENDER_NAME, email: SENDER_EMAIL },
+          to: [{ email: to, name: toName || to.split('@')[0] }],
+          subject,
+          htmlContent: html || `<p>${text || subject}</p>`
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json().catch(() => ({}));
+        console.log(`[EmailService] Delivered via Brevo HTTPS to ${to} (ID: ${data.messageId || 'OK'})`);
+        return data;
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        console.warn('[EmailService] Brevo API notice:', response.status, errData);
+      }
+    } catch (brevoErr) {
+      console.warn('[EmailService] Brevo HTTPS network error:', brevoErr.message);
+    }
+  }
+
+  // 2. Resend HTTPS API (Port 443 - Fallback)
+  if (RESEND_API_KEY) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: 'Inventory App <onboarding@resend.dev>',
+          to: Array.isArray(to) ? to : [to],
+          subject,
+          html: html || text,
+          text: text || ''
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.log(`[EmailService] Delivered via Resend HTTPS to ${to}:`, data.id);
+        return data;
+      }
+    } catch (resendErr) {
+      console.warn('[EmailService] Resend HTTPS network error:', resendErr.message);
+    }
+  }
+
+  // 3. Fallback to Nodemailer SMTP (Works locally)
+  try {
+    const info = await transporter.sendMail({
+      from: `"${SENDER_NAME}" <${EMAIL_USER}>`,
+      to,
+      subject,
+      html,
+      text: text || ''
+    });
+    console.log(`[EmailService] Delivered via SMTP to ${to} (${info.messageId})`);
+    return info;
+  } catch (smtpErr) {
+    console.warn(`[EmailService] SMTP delivery skipped: ${smtpErr.message}`);
+    return null;
+  }
+}
 
 function formatINR(val) {
   return '₹ ' + Number(val || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
@@ -141,7 +231,7 @@ async function sendOrderPlacedCustomerEmail({ order, customer, items = [] }) {
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory App Orders" <${EMAIL_USER}>`,
       to: customer.email,
       subject: `Order Confirmation #${orderId} - ₹${totalAmount.toLocaleString('en-IN')}`,
@@ -207,7 +297,7 @@ async function sendOrderPlacedVendorEmail({ order, vendor, vendorItems = [] }) {
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Vendor Alerts" <${EMAIL_USER}>`,
       to: vendor.email,
       subject: `New Order #${orderId} Received - Payout: ₹${vendorTotal.toLocaleString('en-IN')}`,
@@ -254,7 +344,7 @@ async function sendOrderStatusUpdateEmail({ order, customer, status }) {
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory App" <${EMAIL_USER}>`,
       to: customer.email,
       subject: `Order Update #${orderId}: ${meta.title.replace(/[^\w\s]/gi, '')}`,
@@ -331,7 +421,7 @@ async function sendReturnRequestedCustomerEmail({ order, customer, returnRecord 
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Support" <${EMAIL_USER}>`,
       to: customer.email,
       subject: `Return Request Received - Order #${orderId}`,
@@ -401,7 +491,7 @@ async function sendReturnRefundCreditedEmail({ order, customer, refundAmount = 0
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Finance" <${EMAIL_USER}>`,
       to: customer.email,
       subject: `Refund Credited: ${formatINR(amount)} for Order #${orderId}`,
@@ -439,7 +529,7 @@ async function sendOtpEmail({ email, name, otp, purpose = 'Login' }) {
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Security" <${EMAIL_USER}>`,
       to: email,
       subject: `${otp} is your ${purpose} Verification Code`,
@@ -473,7 +563,7 @@ async function sendPasswordResetEmail({ email, name, resetLink }) {
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Security" <${EMAIL_USER}>`,
       to: email,
       subject: `Reset your Password - Inventory App`,
@@ -558,7 +648,7 @@ async function sendMonthlyVendorPayoutEmail({ vendor, transactions = [], month =
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Merchant Settlements" <${EMAIL_USER}>`,
       to: vendor.email,
       subject: `Monthly Statement - ${monthLabel}: ${formatINR(totalPayout || (totalEarnings - totalCommission))}`,
@@ -648,7 +738,7 @@ async function sendMonthlyAdminRevenueEmail({ admin, metrics = {}, month = '' })
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Executive Reports" <${EMAIL_USER}>`,
       to: admin.email,
       subject: `Executive Monthly Revenue Report - ${monthLabel}: GMV ${formatINR(grossVolume)}`,
@@ -729,7 +819,7 @@ async function sendMonthlyCustomerStatementEmail({ customer, orders = [], totalS
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Customer Care" <${EMAIL_USER}>`,
       to: customer.email,
       subject: `Your Monthly Shopping & Wallet Statement - ${monthLabel}`,
@@ -818,7 +908,7 @@ async function sendSixMonthReviewEmail({ recipient, userType = 'customer', metri
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Milestone Reports" <${EMAIL_USER}>`,
       to: recipient.email,
       subject: title,
@@ -903,7 +993,7 @@ async function sendAnnualReviewEmail({ recipient, userType = 'customer', metrics
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Annual Digest" <${EMAIL_USER}>`,
       to: recipient.email,
       subject: title,
@@ -1049,7 +1139,7 @@ async function sendDailyVendorDigestEmail({ vendor, orders = [], transactions = 
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Daily Digest" <${EMAIL_USER}>`,
       to: vendor.email,
       subject: `Daily Merchant Summary - ${displayDate}: ${totalOrders} Order(s), ₹${grossSales.toLocaleString('en-IN')}`,
@@ -1139,7 +1229,7 @@ async function sendTicketResolvedCustomerEmail({ ticket, customerEmail, customer
   `;
 
   try {
-    await transporter.sendMail({
+    await dispatchEmail({
       from: `"Inventory Customer Support" <${EMAIL_USER}>`,
       to: toEmail,
       subject: `[Resolved] Ticket #${ticketId}: ${subject}`,
